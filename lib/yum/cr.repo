@@ -1,0 +1,5 @@
+[cr]
+name=cr
+baseurl=http://10.172.10.191/cr
+gpgcheck=0
+enabled=1

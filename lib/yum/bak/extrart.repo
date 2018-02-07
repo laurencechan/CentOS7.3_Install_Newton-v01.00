@@ -1,0 +1,6 @@
+[extrart]
+name=extrart
+baseurl=http://172.16.6.4:8000/bluedon/7/extras/x86_64/Packages/
+enabled=1
+gpgcheck=0
+

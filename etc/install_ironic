@@ -1,0 +1,213 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+
+if [ -f  /etc/openstack-newton_tag/install_ironic.tag ]
+then 
+	echo -e "\033[41;37m you haved install ironic \033[0m"
+	log_info "you haved install ironic."	
+	exit
+fi
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null"
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+#create ironic databases 
+function  fn_create_ironic_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE ironic CHARACTER SET utf8;" &&  \
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON ironic.* TO 'ironic'@'localhost' IDENTIFIED BY '${IRONIC_PASSWORD}';" && \
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON ironic.* TO 'ironic'@'%' IDENTIFIED BY '${IRONIC_PASSWORD}';" 
+fn_log "create ironic databases"
+}
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEIRONIC=`cat test | grep ironic`
+rm -rf test 
+if [ ${DATABASEIRONIC}x = ironicx ]
+then
+	log_info "ironic database had installed."
+else
+	fn_create_ironic_database
+fi
+
+function fn_install_ironic () {
+yum clean all && yum install openstack-ironic-api openstack-ironic-conductor python-ironicclient -y
+fn_log  "yum clean all && yum clean all && yum install openstack-ironic-api openstack-ironic-conductor python-ironicclient -y"
+}
+OPENSTACKIRONIC_COUNT=`rpm -aq | grep openstack-ironic-* | wc -l`
+if [ $OPENSTACKIRONIC_COUNT -ne 0 ]
+then
+     log_info "openstack-ironic-* had installed."
+else
+     fn_install_ironic
+fi
+
+systemctl enable openstack-ironic-api openstack-ironic-conductor && systemctl start openstack-ironic-api openstack-ironic-conductor
+fn_log "systemctl enable openstack-ironic-api openstack-ironic-conductor && systemctl start openstack-ironic-api openstack-ironic-conductor"
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+[ -f /etc/ironic/ironic.conf_bak ]  || cp -a /etc/ironic/ironic.conf{,_bak}
+openstack-config --set  /etc/ironic/ironic.conf database connection  mysql+pymysql://ironic:${IRONIC_PASSWORD}@${MANAGER_IP}/ironic?charset=utf8 && \
+openstack-config --set  /etc/ironic/ironic.conf oslo_messaging_rabbit rabbit_host ${HOST_NAME}
+openstack-config --set  /etc/ironic/ironic.conf DEFAULT auth_strategy keystone
+openstack-config --set  /etc/ironic/ironic.conf keystone_authtoken auth_type v3password
+openstack-config --set  /etc/ironic/ironic.conf keystone_authtoken auth_uri http://${HOST_NAME}:5000/v3/
+openstack-config --set  /etc/ironic/ironic.conf keystone_authtoken auth_url http://${HOST_NAME}:35357/v3/
+openstack-config --set  /etc/ironic/ironic.conf keystone_authtoken admin_user ironic
+openstack-config --set /etc/ironic/ironic.conf keystone_authtoken admin_password ${IRONIC_PASSWORD}
+openstack-config --set /etc/ironic/ironic.conf keystone_authtoken admin_tenant_name service
+openstack-config --set /etc/ironic/ironic.conf DEFAULT my_ip ${MANAGER_IP}
+openstack-config --set /etc/ironic/ironic.conf DEFAULT enabled_drivers pxe_ipmitool
+openstack-config --set /etc/ironic/ironic.conf conductor api_url http://${HOST_NAME}:6385
+openstack-config --set /etc/ironic/ironic.conf neutron url http://${HOST_NAME}:9696
+openstack-config --set /etc/ironic/ironic.conf glance glance_host ${HOST_NAME}
+fn_log "config /etc/ironic/ironic.conf"
+
+ironic-dbsync --config-file /etc/ironic/ironic.conf create_schema
+fn_log "ironic-dbsync --config-file /etc/ironic/ironic.conf create_schema"
+systemctl restart openstack-ironic-api openstack-ironic-conductor
+fn_log "systemctl restart openstack-ironic-api openstack-ironic-conductor"
+
+source /root/admin-openrc.sh
+USER_IRONIC=`openstack user list | grep ironic | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_IRONIC}x = ironicx ]
+then
+	log_info "openstack user had created  ironic"
+else
+	openstack user create --password ${IRONIC_PASSWORD} --email ironic@example.com ironic
+	fn_log "openstack user create --password ${IRONIC_PASSWORD} --email ironic@example.com ironic"
+	openstack role add --project service --user ironic admin
+	fn_log "openstack role add --project service --user ironic admin"
+fi
+
+SERVICE_IRONIC=`openstack service list | grep ironic | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${SERVICE_IRONIC}x = ironicx ]
+then 
+	log_info "openstack service create ironic."
+else
+	openstack service create --name ironic --description "Ironic baremetal provisioning service" baremetal
+	fn_log "openstack service create --name ironic --description "Ironic baremetal provisioning service" baremetal"
+fi
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list | grep baremetal | grep internal | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep baremetal | grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep baremetal | grep admin | wc -l`
+if [  ${ENDPOINT_LIST_INTERNAL}  -eq 1  ]  && [ ${ENDPOINT_LIST_PUBLIC}  -eq  1   ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 1  ]
+then
+	log_info "openstack endpoint create ironic."
+else
+    openstack endpoint create --region ${REGION_NAME} baremetal public http://${HOST_NAME}:6385 && openstack endpoint create --region ${REGION_NAME} baremetal internal http://${HOST_NAME}:6385 && openstack endpoint create --region ${REGION_NAME} baremetal admin http://${HOST_NAME}:6385
+	
+	fn_log "openstack endpoint create --region ${REGION_NAME} baremetal public http://${HOST_NAME}:6385 && openstack endpoint create --region ${REGION_NAME} baremetal internal http://${HOST_NAME}:6385 && openstack endpoint create --region ${REGION_NAME} baremetal admin http://${HOST_NAME}:6385"
+fi
+
+ROLE_BAREMETAL_ADMIN=`openstack role list | grep baremetal_admin | awk -F "|" '{print$3}'`
+if [ ${ROLE_BAREMETAL_ADMIN}x = baremetal_adminx ]
+then
+    log_info "openstack Role had created  baremetal_admin"
+else
+	openstack role create baremetal_admin
+	fn_log "openstack role create baremetal_admin"
+    openstack role create baremetal_observer
+	fn_log "openstack role create baremetal_observer"
+fi
+
+PROJECT_BAREMETAL=`openstack project list | grep baremetal | awk -F "|" '{print$3}'`
+if [ ${PROJECT_BAREMETAL}x = baremetalx ]
+then
+    log_info "openstack project had created baremetal"
+else
+	openstack project create baremetal
+	fn_log "openstack project create baremetal"
+fi
+
+source /root/admin-openrc.sh
+USER_STATIC=`openstack user list | grep ${BAREMETAL_USER} | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_STATIC}x = ${BAREMETAL_USER}x ]
+then
+	log_info "openstack user had created ${BAREMETAL_USER}"
+else
+	
+	openstack user create --domain default --project-domain default --project baremetal --password ${BAREMETAL_PASSWORD} ${BAREMETAL_USER}
+    fn_log "openstack user create --domain default --project-domain default --project baremetal --password ${BAREMETAL_PASSWORD} ${BAREMETAL_USER}"
+	openstack role add --user-domain default --project-domain default --project baremetal --user ${BAREMETAL_USER} baremetal_observer
+	fn_log "openstack role add --user-domain default --project-domain default --project baremetal --user ${BAREMETAL_USER} baremetal_observer"
+fi
+
+#openstack-config --set /etc/nova/nova.conf DEFAULT compute_driver ironic.IronicDriver
+openstack-config --set /etc/nova/nova.conf DEFAULT firewall_driver nova.virt.firewall.NoopFirewallDriver
+openstack-config --set /etc/nova/nova.conf DEFAULT scheduler_host_manager ironic_host_manager
+openstack-config --set /etc/nova/nova.conf DEFAULT ram_allocation_ratio 1.0
+openstack-config --set /etc/nova/nova.conf DEFAULT reserved_host_memory_mb 0
+openstack-config --set /etc/nova/nova.conf DEFAULT scheduler_use_baremetal_filters True
+openstack-config --set /etc/nova/nova.conf DEFAULT scheduler_tracks_instance_changes False
+openstack-config --set /etc/nova/nova.conf DEFAULT scheduler_host_subset_size 9999999
+openstack-config --set /etc/nova/nova.conf ironic admin_username ironic
+openstack-config --set /etc/nova/nova.conf ironic admin_password ${IRONIC_PASSWORD}
+openstack-config --set /etc/nova/nova.conf ironic admin_url http://${HOST_NAME}:35357/v3
+openstack-config --set /etc/nova/nova.conf ironic admin_tenant_name service
+openstack-config --set /etc/nova/nova.conf ironic api_endpoint http://${HOST_NAME}:6385/v1
+fn_log "config /etc/nova/nova.conf"
+systemctl restart openstack-nova-scheduler openstack-nova-compute
+fn_log "systemctl restart openstack-nova-scheduler openstack-nova-compute"
+
+echo -e "\033[32m #################################################\033[0m"
+echo -e "\033[32m ###         Install Ironic Sucessed           ###\033[0m"
+echo -e "\033[32m #################################################\033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_nova.tag
+
+
+
+

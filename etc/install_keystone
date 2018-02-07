@@ -1,0 +1,216 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [ ${http_proxy}x = x -a  ${https_proxy}x = x  -a ${ftp_proxy}x = x ]
+then
+	log_info "proxy is none."
+else
+	echo -e "\033[41;37m you should unset proxy. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_mariadb.tag ]
+then 
+	log_info "mariadb have installed ."
+else
+	echo -e "\033[41;37m you should install mariadb first. \033[0m"
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/config_keystone.tag ]
+then 
+	echo -e "\033[41;37m /etc/openstack-newton_tag/config_keystone.tag \033[0m"
+	log_info "you had install keystone."	
+	exit
+fi
+
+#create databases
+function  fn_create_keystone_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE keystone;" &&  mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '${KEYSTONE_PASSWORD}';" && mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY '${KEYSTONE_PASSWORD}';"   
+fn_log "create databases"
+
+}
+
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEKEYSTONE=`cat test | grep keystone`
+rm -rf test 
+if [ ${DATABASEKEYSTONE}x = keystonex ]
+then
+	log_info "keystone database had installed."
+else
+	fn_create_keystone_database
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null "
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_keystone () {
+yum clean all && yum install openstack-keystone httpd mod_wsgi openstack-utils -y
+fn_log "yum clean all && yum install oopenstack-keystone httpd mod_wsgi openstack-utils -y"
+$PWD/etc/install_task_event
+}
+
+OPENSTACKKEYSTONE_COUNT=`rpm -aq |grep openstack-keystone|wc -l`
+if [ $OPENSTACKKEYSTONE_COUNT -ne 0 ]
+then
+     log_info "openstack-keystone had installed."
+else
+     fn_install_keystone
+fi
+                  			   
+[ -f /etc/keystone/keystone.conf_bak ]  || cp -a /etc/keystone/keystone.conf /etc/keystone/keystone.conf_bak
+fn_log "[ -f /etc/keystone/keystone.conf_bak ]  || cp -a /etc/keystone/keystone.conf /etc/keystone/keystone.conf_bak"
+                                                      
+openstack-config --set /etc/keystone/keystone.conf database connection mysql+pymysql://keystone:${KEYSTONE_PASSWORD}@${HOST_NAME}/keystone  
+fn_log "openstack-config --set /etc/keystone/keystone.conf database connection mysql+pymysql://keystone:${KEYSTONE_PASSWORD}@${HOST_NAME}/keystone"
+
+openstack-config --set /etc/keystone/keystone.conf token provider  fernet
+fn_log "openstack-config --set /etc/keystone/keystone.conf token provider  fernet"
+
+su -s /bin/sh -c "keystone-manage db_sync" keystone
+fn_log "su -s /bin/sh -c "keystone-manage db_sync" keystone"
+
+keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone && keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+fn_log "keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone && keystone-manage credential_setup --keystone-user keystone --keystone-group keystone"
+
+keystone-manage bootstrap --bootstrap-password ${ADMIN_PASSWD} --bootstrap-admin-url http://${HOST_NAME}:35357/v3/ --bootstrap-internal-url http://${HOST_NAME}:35357/v3/ --bootstrap-public-url http://${HOST_NAME}:5000/v3/ --bootstrap-region-id ${REGION_NAME}
+fn_log "keystone-manage bootstrap --bootstrap-password ${ADMIN_PASSWD} --bootstrap-admin-url http://${HOST_NAME}:35357/v3/ --bootstrap-internal-url http://${HOST_NAME}:35357/v3/ --bootstrap-public-url http://${HOST_NAME}:5000/v3/ --bootstrap-region-id ${REGION_NAME}"
+
+[ -f /etc/httpd/conf/httpd.conf_bak  ] || cp -a /etc/httpd/conf/httpd.conf{,_bak}
+fn_log "[ -f /etc/httpd/conf/httpd.conf_bak  ] || cp -a /etc/httpd/conf/httpd.conf{,_bak}"
+
+sed  -i  "s/#ServerName www.example.com:80/ServerName ${HOST_NAME}/" /etc/httpd/conf/httpd.conf
+fn_log "sed  -i  "s/#ServerName www.example.com:80/ServerName ${HOST_NAME}/" /etc/httpd/conf/httpd.conf"
+
+rm -rf /etc/httpd/conf.d/wsgi-keystone.conf  && ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/ && systemctl enable httpd.service && systemctl start httpd.service
+fn_log "rm -rf /etc/httpd/conf.d/wsgi-keystone.conf  && ln -s /usr/share/keystone/wsgi-keystone.conf /etc/httpd/conf.d/ && systemctl enable httpd.service && systemctl start httpd.service"
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+
+export OS_USERNAME=admin
+export OS_PASSWORD=${ADMIN_PASSWD}
+export OS_PROJECT_NAME=admin
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_AUTH_URL=http://${HOST_NAME}:35357/v3
+export OS_IDENTITY_API_VERSION=3
+sleep 5 
+
+PROJECT_SERVICE=`openstack project list |grep service | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${PROJECT_SERVICE}x = servicex ]
+then
+	log_info "openstack project had created service. "
+else
+	openstack project create --domain default   --description "Service Project" service
+	fn_log "openstack project create --domain default   --description "Service Project" service"
+fi
+
+PROJECT_DEMO=`openstack project list |grep demo | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${PROJECT_DEMO}x = demox ]
+then
+	log_info "openstack project had created demo "
+else
+	openstack project create --domain default   --description "Demo Project" demo
+	fn_log "openstack project create --domain default   --description "Demo Project" demo"
+fi
+
+USER_DEMO=` openstack user list |grep demo |awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_DEMO}x  =  demox ]
+then
+	log_info "openstack user had created  demo "
+else
+	openstack user create --domain default  demo  --password ${DEMO_PASSWD}
+	fn_log "openstack user create  demo  --password ${DEMO_PASSWD}"
+fi
+
+ROLE_LIST=`openstack role list | grep user  |awk -F "|" '{print$3}' | awk -F " " '{print$1}'  | grep -v  heat_stack_user`
+if [ ${ROLE_LIST}x = userx ]
+then
+	log_info "openstack role had  created user."
+else
+	openstack role create user
+	fn_log "openstack role create user"
+	openstack role add --project demo --user demo user
+	fn_log "openstack role add --project demo --user demo user"
+fi
+
+unset OS_TOKEN OS_URL
+
+openstack --os-auth-url http://${HOST_NAME}:35357/v3  --os-project-domain-name default --os-user-domain-name default   --os-project-name admin --os-username admin token issue --os-password ${ADMIN_PASSWD}
+fn_log "openstack --os-auth-url http://${HOST_NAME}:35357/v3  --os-project-domain-name default --os-user-domain-name default   --os-project-name admin --os-username admin token issue --os-password ${ADMIN_PASSWD}"
+
+openstack --os-auth-url http://${HOST_NAME}:5000/v3   --os-project-domain-name default --os-user-domain-name default   --os-project-name demo --os-username demo token issue --os-password ${DEMO_PASSWD}
+fn_log "openstack --os-auth-url http://${HOST_NAME}:5000/v3   --os-project-domain-name default --os-user-domain-name default   --os-project-name demo --os-username demo token issue --os-password ${DEMO_PASSWD}"
+
+[ -f /root/admin-openrc.sh  ] || cp -a $PWD/lib/admin-openrc.sh  /root/admin-openrc.sh 
+fn_log "[ -f /root/admin-openrc.sh  ] || cp -a $PWD/lib/admin-openrc.sh  /root/admin-openrc.sh  "
+
+[ -f /root/demo-openrc.sh  ]  || cp -a $PWD/lib/demo-openrc.sh  /root/demo-openrc.sh 
+fn_log "cp -a $PWD/lib/demo-openrc.sh  /root/demo-openrc.sh "
+echo " " >>/root/admin-openrc.sh
+echo " " >>/root/demo-openrc.sh
+echo "export OS_PASSWORD=${ADMIN_PASSWD}" >>/root/admin-openrc.sh
+echo "export OS_AUTH_URL=http://${HOST_NAME}:35357/v3" >>/root/admin-openrc.sh
+echo "export OS_REGION_NAME=${REGION_NAME}" >>/root/admin-openrc.sh
+echo "export OS_PASSWORD=${DEMO_PASSWD}" >>/root/demo-openrc.sh
+echo "export OS_AUTH_URL=http://${HOST_NAME}:5000/v3" >>/root/demo-openrc.sh
+echo "export OS_REGION_NAME=${REGION_NAME}" >>/root/demo-openrc.sh
+
+source ~/admin-openrc.sh
+openstack token issue
+fn_log "openstack token issue"
+
+echo -e "\033[32m ################################################ \033[0m"
+echo -e "\033[32m ###       Install Keystone Sucessed         #### \033[0m"
+echo -e "\033[32m ################################################ \033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/config_keystone.tag

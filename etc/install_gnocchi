@@ -1,0 +1,167 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_gnocchi.tag ]
+then 
+	echo -e "\033[41;37m you had install gnocchi \033[0m"
+	log_info "you had install gnocchi."	
+	exit
+fi
+
+#create gnocchi databases 
+function  fn_create_gnocchi_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE gnocchi;" 
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON gnocchi.* TO 'gnocchi'@'localhost' IDENTIFIED BY '${GNOCCHI_PASSWORD}';"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON gnocchi.* TO 'gnocchi'@'%' IDENTIFIED BY '${GNOCCHI_PASSWORD}';" 
+fn_log "create gnocchi databases"
+}
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEGNOCCHI=`cat test | grep gnocchi`
+rm -rf test 
+if [ ${DATABASEGNOCCHI}x = gnocchix ]
+then
+	log_info "gnocchi database had installed."
+else
+	fn_create_gnocchi_database
+fi
+
+source /root/admin-openrc.sh
+USER_GNOCCHI=`openstack user list | grep gnocchi | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_GNOCCHI}x = gnocchix ]
+then
+	log_info "openstack user had created  gnocchi"
+else
+	openstack user create gnocchi --password ${GNOCCHI_PASSWORD}
+	fn_log "openstack user create gnocchi --password ${GNOCCHI_PASSWORD}"
+	openstack role add --project service --user gnocchi admin
+	fn_log "openstack role add --project service --user gnocchi admin"
+fi
+
+SERVICE_GNOCCHI=`openstack service list | grep gnocchi | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${SERVICE_GNOCCHI}x = gnocchix ]
+then 
+	log_info "openstack service create gnocchi."
+else
+	openstack service create --name gnocchi  --description "Metric Service" metric
+	fn_log "openstack service create --name gnocchi  --description "Metric Service" metric"
+fi
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list  | grep gnocchi  |grep internal | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep gnocchi   |grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep gnocchi   |grep admin | wc -l`
+if [  ${ENDPOINT_LIST_INTERNAL}  -eq 0  ]  && [ ${ENDPOINT_LIST_PUBLIC}  -eq  0   ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 0  ]
+then
+	openstack endpoint create --region ${REGION_NAME} gnocchi public http://${HOST_NAME}:8041
+    openstack endpoint create --region ${REGION_NAME} gnocchi internal http://${HOST_NAME}:8041
+    openstack endpoint create --region ${REGION_NAME} gnocchi admin http://${HOST_NAME}:8041
+	fn_log "create endpoint"
+else
+	log_info "openstack endpoint create gnocchi."
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null "
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_openstackgnocchi () {				  
+yum install openstack-gnocchi-api openstack-gnocchi-metricd python-gnocchiclient -y
+fn_log "yum install openstack-gnocchi-api openstack-gnocchi-metricd python-gnocchiclient -y"
+}
+OPENSTACKGNOCCHI_COUNT=`rpm -aq |grep openstack-gnocchi-*|wc -l`
+if [ $OPENSTACKGNOCCHI_COUNT -eq 2 ]
+then
+     log_info "openstack-gnocchi had installed."
+else
+     fn_install_openstackgnocchi
+fi		
+
+openstack-config --set /etc/gnocchi/gnocchi.conf DEFAULT log_dir /var/log/gnocchi
+openstack-config --set /etc/gnocchi/gnocchi.conf api auth_mode keystone
+openstack-config --set /etc/gnocchi/gnocchi.conf indexer url mysql+pymysql://gnocchi:${GNOCCHI_PASSWORD}@${HOST_NAME}/gnocchi
+openstack-config --set /etc/gnocchi/gnocchi.conf storage file_basepath /var/lib/gnocchi
+openstack-config --set /etc/gnocchi/gnocchi.conf storage driver file
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_type password  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_url http://${HOST_NAME}:5000/v3  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken auth_uri http://${HOST_NAME}:35357/v3  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken memcached_servers ${HOST_NAME}:11211  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken project_domain_name Default  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken user_domain_name Default  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken project_name service  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken username gnocchi  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken password ${GNOCCHI_PASSWORD}
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken interface internalURL  
+openstack-config --set /etc/gnocchi/gnocchi.conf keystone_authtoken region_name ${REGION_NAME}
+fn_log "config /etc/gnocchi/gnocchi.conf"
+
+gnocchi-upgrade
+fn_log "gnocchi-upgrade"
+systemctl enable openstack-gnocchi-api.service openstack-gnocchi-metricd.service && systemctl start openstack-gnocchi-api.service  openstack-gnocchi-metricd.service
+fn_log "systemctl enable openstack-gnocchi-api.service openstack-gnocchi-metricd.service && systemctl start openstack-gnocchi-api.service  openstack-gnocchi-metricd.service"
+
+openstack-config --set /etc/ceilometer/ceilometer.conf DEFAULT meter_dispatchers gnocchi  
+openstack-config --set /etc/ceilometer/ceilometer.conf DEFAULT event_dispatchers gnocchi
+openstack-config --set /etc/ceilometer/ceilometer.conf DEFAULT transport_url rabbit://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${HOST_NAME}
+openstack-config --set /etc/ceilometer/ceilometer.conf dispatcher_gnocchi filter_service_activity False  
+openstack-config --set /etc/ceilometer/ceilometer.conf dispatcher_gnocchi archive_policy low
+fn_log "config /etc/ceilometer/ceilometer.conf"
+sed -i "s@8000@8041@g" /usr/bin/gnocchi-api
+
+systemctl restart openstack-gnocchi-api.service  openstack-gnocchi-metricd.service
+fn_log "systemctl restart openstack-gnocchi-api.service  openstack-gnocchi-metricd.service"
+
+. /root/admin-openrc.sh && gnocchi metric list
+fn_log ". /root/admin-openrc.sh && gnocchi metric list"
+
+echo -e "\033[32m ################################################ \033[0m"
+echo -e "\033[32m ###         Install gnocchi Sucessed         ### \033[0m"
+echo -e "\033[32m ################################################ \033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_gnocchi.tag

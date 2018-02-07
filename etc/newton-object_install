@@ -1,0 +1,237 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/config_keystone.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script oncontroller.  \033[0m"
+	log_error "Oh no ! you can't execute this script oncontroller. "
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/swift.tag ]
+then 
+	echo -e "\033[41;37m you had installed swift service. \033[0m"
+	log_info "you had installed swift service."	
+	exit
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null"
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_xfsprogs () {
+yum clean all && yum install xfsprogs -y  
+fn_log "yum clean all && yum install xfsprogs -y"
+}
+XFSPROGS_COUNT=`rpm -aq | grep xfsprogs | wc -l`
+if [ $XFSPROGS_COUNT -ne 0 ]
+then
+     log_info "xfsprogs had installed."
+else
+     fn_install_xfsprogs
+fi
+
+function fn_install_rsync () {
+yum clean all && yum install -y rsync
+fn_log "yum clean all && yum install -y rsync"
+}
+RSYNC_COUNT=`rpm -aq | grep rsync | wc -l`
+if [ $RSYNC_COUNT -ne 0 ]
+then
+     log_info "rsync had installed."
+else
+     fn_install_rsync
+fi
+
+function fn_create_swift () {
+if [ -z ${OBJECT_SWIFT_DISK_ONE} ] && [ -z ${OBJECT_SWIFT_DISK_TWO} ] && [ -z ${OBJECT_SWIFT_DISK_THR} ]
+then 
+	log_info "there is not Three disk for swift."
+	return 1
+else
+	mkfs.xfs -f ${OBJECT_SWIFT_DISK_ONE} && mkfs.xfs -f ${OBJECT_SWIFT_DISK_TWO} && mkfs.xfs -f ${OBJECT_SWIFT_DISK_THR}
+	fn_log "mkfs.xfs -f ${OBJECT_SWIFT_DISK_ONE} && mkfs.xfs -f ${OBJECT_SWIFT_DISK_TWO} && mkfs.xfs -f ${OBJECT_SWIFT_DISK_THR}"
+	mkdir -p /srv/node/data_{a,b,c}
+	fn_log "mkdir -p /srv/node/data_{a,b,c}"
+	DATA_COUNT=`grep "data_*" /etc/fstab | wc -l`
+	if [ $DATA_COUNT -ne 0 ]
+	then
+	log_info "data had cofng."
+	else
+	cat >>/etc/fstab<<EOF
+${OBJECT_SWIFT_DISK_ONE} /srv/node/data_b xfs noatime,nodiratime,nobarrier,logbufs=8 0 2
+${OBJECT_SWIFT_DISK_TWO} /srv/node/data_c xfs noatime,nodiratime,nobarrier,logbufs=8 0 2
+${OBJECT_SWIFT_DISK_THR} /srv/node/data_d xfs noatime,nodiratime,nobarrier,logbufs=8 0 2
+EOF
+	fi
+	
+	 mount /srv/node/data_a && mount /srv/node/data_b && mount /srv/node/data_c
+	 cat >/etc/rsyncd.conf<<EOF
+uid = swift
+gid = swift
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+address = ${OBJECT_MANAGER_IP}
+
+[account]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/account.lock
+
+[container]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/container.lock
+
+[object]
+max connections = 2
+path = /srv/node/
+read only = False
+lock file = /var/lock/object.lock
+EOF
+systemctl enable rsyncd.service && systemctl start rsyncd.service
+fn_log "systemctl enable rsyncd.service && systemctl start rsyncd.service"
+fi
+}
+
+if [ -z ${OBJECT_SWIFT_DISK_ONE} ] && [ -z ${OBJECT_SWIFT_DISK_TWO} ] && [ -z ${OBJECT_SWIFT_DISK_THR} ]
+then 
+	log_info "there is not Three disk for swift."
+	return 1
+else
+    fn_create_swift
+fi
+
+function fn_install_swift () {
+yum clean all && yum install openstack-swift-account openstack-swift-container openstack-swift-object -y
+fn_log "yum clean all && yum clean all && yum install openstack-swift-account openstack-swift-container openstack-swift-object -y"
+}
+OPENSTACKSWIFT_COUNT=`rpm -aq | grep openstack-swift-* | wc -l`
+if [ $OPENSTACKSWIFT_COUNT -ne 0 ]
+then
+     log_info "openstack-swift-* had installed."
+else
+     fn_install_swift
+fi
+
+cp -a $PWD/lib/swift/account-server.conf /etc/swift/
+cp -a $PWD/lib/swift/container-server.conf /etc/swift/
+cp -a $PWD/lib/swift/object-server.conf /etc/swift/
+
+openstack-config --set /etc/swift/account-server.conf DEFAULT bind_ip ${OBJECT_MANAGER_IP}
+fn_log "config /etc/swift/account-server.conf"
+openstack-config --set /etc/swift/container-server.conf DEFAULT bind_ip ${OBJECT_MANAGER_IP}
+fn_log "config /etc/swift/container-server.conf"
+openstack-config --set /etc/swift/object-server.conf DEFAULT bind_ip ${OBJECT_MANAGER_IP}
+fn_log "config /etc/swift/object-server.conf"
+chown -R swift:swift /srv/node
+mkdir -p /var/cache/swift
+chown -R root:swift /var/cache/swift
+chmod -R 775 /var/cache/swift
+
+systemctl enable openstack-swift-account.service openstack-swift-account-auditor.service openstack-swift-account-reaper.service openstack-swift-account-replicator.service
+fn_log "systemctl enable openstack-swift-account.service openstack-swift-account-auditor.service openstack-swift-account-reaper.service openstack-swift-account-replicator.service"
+systemctl start openstack-swift-account.service openstack-swift-account-auditor.service openstack-swift-account-reaper.service openstack-swift-account-replicator.service
+fn_log "systemctl start openstack-swift-account.service openstack-swift-account-auditor.service openstack-swift-account-reaper.service openstack-swift-account-replicator.service"
+systemctl enable openstack-swift-container.service openstack-swift-container-auditor.service openstack-swift-container-replicator.service openstack-swift-container-updater.service
+fn_log "systemctl enable openstack-swift-container.service openstack-swift-container-auditor.service openstack-swift-container-replicator.service openstack-swift-container-updater.service"
+systemctl start openstack-swift-container.service openstack-swift-container-auditor.service openstack-swift-container-replicator.service openstack-swift-container-updater.service
+fn_log "systemctl start openstack-swift-container.service openstack-swift-container-auditor.service openstack-swift-container-replicator.service openstack-swift-container-updater.service"
+systemctl enable openstack-swift-object.service openstack-swift-object-auditor.service openstack-swift-object-replicator.service openstack-swift-object-updater.service
+fn_log "systemctl enable openstack-swift-object.service openstack-swift-object-auditor.service openstack-swift-object-replicator.service openstack-swift-object-updater.service"
+systemctl start openstack-swift-object.service openstack-swift-object-auditor.service openstack-swift-object-replicator.service openstack-swift-object-updater.service
+fn_log "systemctl start openstack-swift-object.service openstack-swift-object-auditor.service openstack-swift-object-replicator.service openstack-swift-object-updater.service"
+
+#生成ring在控制节点添加
+>/root/add_object
+echo "cd /etc/swift">>/root/add_object
+for DEVICE_NAME in `cat /etc/fstab |grep data_|awk -F " " '{print$1}'|awk -F "/" '{print$3}'`
+do
+{
+  echo "swift-ring-builder account.builder add --region 1 --zone 1 --ip ${OBJECT_MANAGER_IP} --port 6202 --device ${DEVICE_NAME} --weight 100">>/root/add_object_node
+  echo "swift-ring-builder container.builder add --region 1 --zone 1 --ip ${OBJECT_MANAGER_IP} --port 6201 --device ${DEVICE_NAME} --weight  100">>/root/add_object_node
+  echo "swift-ring-builder object.builder add --region 1 --zone 1 --ip ${OBJECT_MANAGER_IP} --port 6200 --device ${DEVICE_NAME} --weight  100">>/root/add_object_node
+}
+done
+echo "swift-ring-builder account.builder">>/root/add_object_node
+echo "swift-ring-builder container.builder">>/root/add_object_node
+echo "swift-ring-builder object.builder">>/root/add_object_node
+echo "swift-ring-builder account.builder rebalance">>/root/add_object_node
+echo "swift-ring-builder container.builder rebalance">>/root/add_object_node
+echo "swift-ring-builder object.builder rebalance">>/root/add_object_node
+
+echo -e "\033[32m ################################################################# \033[0m"
+echo -e "\033[32m ###       Install Swift Service  Sucessed                     ### \033[0m"
+echo -e "\033[32m ###Please in controller execute the /root/add_object_node file### \033[0m"
+echo -e "\033[32m ################################################################# \033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/swift.tag
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

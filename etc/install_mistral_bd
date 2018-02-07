@@ -1,0 +1,181 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_mistral.tag ]
+then 
+	echo -e "\033[41;37m you had install mistral \033[0m"
+	log_info "you had install mistral."	
+	exit
+fi
+
+#$PWD/etc/install_bdcos
+function fn_create_mistral_database() {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE mistral;"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON mistral.* TO 'mistral'@'localhost' IDENTIFIED BY '${MISTRAL_PASSWORD}';"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON mistral.* TO 'mistral'@'%' IDENTIFIED BY '${MISTRAL_PASSWORD}';"
+fn_log "create mistral databases"
+}
+
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEMISTRAL=`cat test | grep mistral`
+rm -rf test 
+if [ ${DATABASEMISTRAL}x = mistralx ]
+then
+	log_info "mistral database had installed."
+else
+	fn_create_mistral_database
+fi
+
+source /root/admin-openrc.sh
+
+USER_MISTRAL=`openstack user list | grep mistral | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_MISTRAL}x = mistralx ]
+then
+	log_info "openstack user had created  mistral"
+else
+	openstack user create mistral --password ${MISTRAL_PASSWORD}
+	fn_log "openstack user create mistral --password ${MISTRAL_PASSWORD}"
+	openstack role add --project service --user mistral admin
+	fn_log "openstack role add --project service --user mistral admin"
+fi
+
+
+SERVICE_MISTRAL=`openstack service list | grep mistral | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${SERVICE_MISTRAL}x = mistralx ]
+then 
+	log_info "openstack service create mistral."
+else
+	openstack service create --name mistral --description "OpenStack Mistral" workflow
+	fn_log "openstack service create --name mistral --description "OpenStack Mistral" workflow"
+fi
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list  | grep mistral  |grep internal | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep mistral   |grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep mistral   |grep admin | wc -l`
+if [  ${ENDPOINT_LIST_INTERNAL}  -eq 0  ]  && [ ${ENDPOINT_LIST_PUBLIC}  -eq  0   ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 0  ]
+then
+	openstack endpoint create --region ${REGION_NAME} mistral public http://${HOST_NAME}:8989/v2
+    openstack endpoint create --region ${REGION_NAME} mistral internal http://${HOST_NAME}:8989/v2
+    openstack endpoint create --region ${REGION_NAME} mistral admin http://${HOST_NAME}:8989/v2
+	fn_log "create endpoint"
+else
+	log_info "openstack endpoint create mistral."
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null "
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_python_pip () {				  
+yum clean all &&  yum install python-pip -y
+fn_log "yum clean all &&  yum install python-pip -y"
+}
+PYTHON_PIP_COUNT=`rpm -aq |grep python-pip|wc -l`
+if [ $PYTHON_PIP_COUNT -ne 0 ]
+then
+     log_info "python-pip had installed."
+else
+     fn_install_python_pip
+fi
+
+wget http://10.172.10.78/bd/mistral.tar.gz
+tar -xvf mistral.tar.gz
+cd mistral
+pip install -r requirements.txt
+python setup.py install
+oslo-config-generator --config-file tools/config/config-generator.mistral.conf --output-file etc/mistral.conf
+mkdir -p /etc/mistral /var/log/mistral
+cp -rf etc/* /etc/mistral/ && cd ~
+
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken auth_uri http://${HOST_NAME}:5000
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken auth_version 3
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken identity_uri http://${HOST_NAME}:35357
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken admin_user admin
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken admin_password ${ADMIN_PASSWD}
+openstack-config --set /etc/mistral/mistral.conf keystone_authtoken admin_tenant_name admin
+openstack-config --set /etc/mistral/mistral.conf database connection mysql+pymysql://mistral:${MISTRAL_PASSWORD}@${HOST_NAME}/mistral
+openstack-config --set /etc/mistral/mistral.conf DEFAULT transport_url rabbit://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${HOST_NAME}
+fn_log "config /etc/mistral/mistral.conf"
+
+mistral-db-manage --config-file /etc/mistral/mistral.conf upgrade head
+fn_log "mistral-db-manage --config-file /etc/mistral/mistral.conf upgrade head"
+mistral-db-manage --config-file /etc/mistral/mistral.conf populate
+
+cat >/usr/lib/systemd/system/openstack-mistral-server.service<<EOF
+[Unit]
+Description=OpenStack mistral API Server
+After=syslog.target network.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=0
+Restart=always
+User=root
+ExecStart=/usr/bin/mistral-server --config-file /etc/mistral/mistral.conf --log-file /var/log/mistral/mistral.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload && systemctl enable openstack-mistral-server && systemctl start openstack-mistral-server
+fn_log "systemctl enable openstack-mistral-server && systemctl start openstack-mistral-server"
+openstack-config --set /usr/lib/python2.7/site-packages/mistral-3.0.3.dev39-py2.7.egg-info/entry_points.txt mistral.actions bd.bd_ha_action mistral.bd_ha.bd_ha_action:BdHaAction
+mistral-db-manage --config-file /etc/mistral/mistral.conf populate
+mistral action-list|grep bd_ha
+
+systemctl restart openstack-mistral-server
+
+echo -e "\033[32m ################################################ \033[0m"
+echo -e "\033[32m ###         Install Mistral Sucessed         ### \033[0m"
+echo -e "\033[32m ################################################ \033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_mistral.tag

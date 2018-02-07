@@ -1,0 +1,7 @@
+[newton]
+name=newton
+baseurl=http://10.172.10.78/openstack-newton1637/
+gpgcheck=0
+enabled=1
+priority=1
+proxy=_none_ 

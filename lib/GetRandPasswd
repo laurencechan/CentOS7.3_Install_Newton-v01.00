@@ -1,0 +1,57 @@
+#!/bin/bash
+#--------------------------------[ OpenStack服务密码配置信息 ]----------------------------#
+
+# 各项服务的密码,默认将全部使用(openssl rand -hex 10) 定义的值.
+MARIADB_PASSWORD=$(openssl rand -hex 10)
+KEYSTONE_PASSWORD=$(openssl rand -hex 10)
+GLANCE_PASSWORD=$(openssl rand -hex 10)
+NOVA_PASSWORD=$(openssl rand -hex 10)
+CINDER_PASSWORD=$(openssl rand -hex 10)
+NEUTRON_PASSWORD=$(openssl rand -hex 10)
+NEUTRON_METADATA_SHARED_PASSWORD=$(openssl rand -hex 10)
+HEAT_PASSWORD=$(openssl rand -hex 10)
+HEAT_DOMAIN_ADMIN_PASSWORD=$(openssl rand -hex 10)
+MONGODB_PASSWORD=$(openssl rand -hex 10)
+CEILOMETER_PASSWORD=$(openssl rand -hex 10)
+AODH_PASSWORD=$(openssl rand -hex 10)
+SWIFT_PASSWORD=$(openssl rand -hex 10)
+GNOCCHI_PASSWORD=$(openssl rand -hex 10)
+MISTRAL_PASSWORD=$(openssl rand -hex 10)
+#IRONIC_PASSWORD=$(openssl rand -hex 10)
+#BAREMETAL_USER=baremetal
+#BAREMETAL_PASSWORD=$(openssl rand -hex 10)
+
+#RabbitMQ的账号及密码
+RABBITMQ_USER=openstack
+RABBITMQ_PASSWORD=$(openssl rand -hex 10)
+
+# 访问Keystone的认证密码.仅可设置admin 和 demo用户的密码.
+ADMIN_TOKEN=$(openssl rand -hex 10)
+ADMIN_PASSWD=$(openssl rand -hex 10)
+DEMO_PASSWD=$(openssl rand -hex 10)
+
+#保存用户名及密码
+echo MARIADB_PASSWORD=${MARIADB_PASSWORD}>>$PWD/lib/SaveRandPasswd
+echo KEYSTONE_PASSWORD=$KEYSTONE_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo GLANCE_PASSWORD=$GLANCE_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo NOVA_PASSWORD=$NOVA_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo CINDER_PASSWORD=$CINDER_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo NEUTRON_PASSWORD=$NEUTRON_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo NEUTRON_METADATA_SHARED_PASSWORD=$NEUTRON_METADATA_SHARED_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo HEAT_PASSWORD=$HEAT_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo HEAT_DOMAIN_ADMIN_PASSWORD=$HEAT_DOMAIN_ADMIN_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo MONGODB_PASSWORD=$MONGODB_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo CEILOMETER_PASSWORD=$CEILOMETER_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo AODH_PASSWORD=$AODH_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo RABBITMQ_USER=$RABBITMQ_USER>>$PWD/lib/SaveRandPasswd
+echo RABBITMQ_PASSWORD=$RABBITMQ_PASSWORD>>$PWD/lib/SaveRandPasswd
+echo ADMIN_TOKEN=$ADMIN_TOKEN>>$PWD/lib/SaveRandPasswd
+echo ADMIN_PASSWD=$ADMIN_PASSWD>>$PWD/lib/SaveRandPasswd
+echo DEMO_PASSWD=$DEMO_PASSWD>>$PWD/lib/SaveRandPasswd
+echo SWIFT_PASSWORD=$SWIFT_PASSWORD>>$PWD/lib/SaveRandPasswd
+#echo GNOCCHI_PASSWORD=$GNOCCHI_PASSWORD>>$PWD/lib/SaveRandPasswd
+#echo MISTRAL_PASSWORD=$MISTRAL_PASSWORD>>$PWD/lib/SaveRandPasswd
+#echo IRONIC_PASSWORD=$IRONIC_PASSWORD>>$PWD/lib/SaveRandPasswd
+#echo BAREMETAL_USER=${BAREMETAL_USER}>>$PWD/lib/SaveRandPasswd
+#echo BAREMETAL_PASSWORD=${BAREMETAL_PASSWORD}>>$PWD/lib/SaveRandPasswd
+#--------------------------------[ END - OpenStack服务密码配置信息 ]-----------------------#

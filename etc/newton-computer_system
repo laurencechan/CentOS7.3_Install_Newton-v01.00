@@ -1,0 +1,204 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info "use local yum."
+else 
+	mkdir -p /etc/yum.repos.d/repo_bak && mv /etc/yum.repos.d/*.repo  /etc/yum.repos.d/repo_bak
+	cp -a $PWD/lib/yum/* /etc/yum.repos.d
+fi
+
+if [ -f  /etc/openstack-newton_tag/presystem-computer.tag ]
+then 
+	echo -e "\033[41;37m you haved config Basic environment \033[0m"
+	log_info "you haved config Basic environment."	
+	exit
+fi
+
+if [  -e /etc/openstack-newton_tag/config_keystone.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script oncontroller.  \033[0m"
+	log_error "Oh no ! you can't execute this script oncontroller. "
+	exit 1
+fi
+
+function fn_check_os_version () {
+if [ -e /etc/system-release  ]
+then
+	OS_VERSION=`cat /etc/system-release | awk -F " " '{print$7}'`
+	fn_log "OS_VERSION=`cat /etc/redhat-release | awk -F " " '{print$7}'`"
+	if [ -z  ${OS_VERSION} ]
+	then
+		OS_VERSION=`cat /etc/system-release | awk -F " " '{print$4}'`
+		fn_log "OS_VERSION=`cat /etc/redhat-release | awk -F " " '{print$4}'`"
+	fi
+else
+	echo -e "\033[41;37m please run script on rhel7.3 or CentOS7.3 \033[0m"
+	log_error "please run script on rhel7.3 or CentOS7.3"
+	exit 1
+fi
+	
+if [  ${OS_VERSION}x  = 7.3x  ] 
+then
+	echo "system is rhel7.3"
+	fn_log "echo "system is rhel7.3""
+elif [ ${OS_VERSION}x = 7.3.1611x   ]
+then
+	echo "system is CentOS7.3"
+	fn_log "echo "system is CentOS7.3""	
+else
+	echo "please install system by rhel-server-7.3-x86_64-dvd.iso or CentOS-7-x86_64-DVD-1611.iso"
+	log_error "echo "please install system by rhel-server-7.3-x86_64-dvd.iso or CentOS-7-x86_64-DVD-1611.iso""
+	exit 1
+fi 
+
+}
+fn_check_os_version
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then
+	mkdir  /etc/openstack-newton_tag
+fi
+
+hostnamectl set-hostname ${COMPUTE_HOST_NAME} && HOSTNAME=${COMPUTE_HOST_NAME}
+fn_log "hostnamectl set-hostname ${COMPUTE_HOST_NAME} && HOSTNAME=${COMPUTE_HOST_NAME}"
+COMPUTE_NAME=`cat /etc/hosts | grep -v localhost | grep ${HOSTNAME} | awk -F " " '{print$2}'`
+if [ "${COMPUTE_NAME}" = "${COMPUTE_HOST_NAME}" ]
+then 
+echo -e "\033[41;37m hosts exists \033[0m"
+else
+     echo ${MANAGER_IP} ${HOST_NAME} >>/etc/hosts
+     echo ${COMPUTE_MANAGER_IP} ${COMPUTE_HOST_NAME} >>/etc/hosts
+     echo ${BLOCK_MANAGER_IP} ${BLOCK_HOST_NAME} >>/etc/hosts
+     echo ${OBJECT_MANAGER_IP} ${OBJECT_HOST_NAME} >>/etc/hosts
+fi
+
+#stop firewall
+service firewalld stop 
+fn_log "stop firewall"
+chkconfig firewalld off 
+fn_log "chkconfig firewalld off"
+
+#disabile selinux
+function fn_set_selinx () {
+cp -a /etc/selinux/config /etc/selinux/config_bak
+sed -i  "s/^SELINUX=enforcing/SELINUX=disabled/g"  /etc/selinux/config
+fn_log "sed -i  "s/^SELINUX=enforcing/SELINUX=disabled/g"  /etc/selinux/config"
+setenforce 0
+}
+STATUS_SELINUX=`cat /etc/selinux/config | grep ^SELINUX= | awk -F "=" '{print$2}'`
+if [  ${STATUS_SELINUX} = enforcing ]
+then 
+	fn_set_selinx
+else 
+	log_info "selinux is disabled."
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null"
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+#install ntp 
+function fn_install_ntp () {
+yum clean all && yum install chrony wget expect -y 
+fn_log "yum clean all && yum install chrony wget expect-y"
+wget http://172.16.110.252:8000/newCloud-v1.3/openstack-newton/oslo_task.tar.gz && tar -xvf oslo_task.tar.gz && cd oslo_task && mv oslo_task bd_auto_log_handle /usr/lib/python2.7/site-packages/ && mv *.conf /etc/ && mv task_db_sync.py bd_log_handle.py /bin/ && chmod 755 /bin/task_db_sync.py /bin/bd_log_handle.py  && cd -
+wget http://172.16.110.252:8000/cloud-v1.0/pip-1.5.4.tar.gz && tar -xvf pip-1.5.4.tar.gz && cd pip-1.5.4 && python setup.py install && pip install xlsxwriter && cd -
+#modify /etc/chrony.conf 
+if [ -f /etc/chrony.conf  ]
+then 
+	cp -a /etc/chrony.conf /etc/chrony.conf_bak && \
+	sed -i 's/^server.*$//g' /etc/chrony.conf && \
+    sed -i "N;2aserver ${HOST_NAME} iburst" /etc/chrony.conf
+	fn_log "modify /etc/chrony.conf"
+fi 
+#restart ntp 
+systemctl enable chronyd.service &&  systemctl start chronyd.service 
+fn_log "systemctl enable chronyd.service &&  systemctl start chronyd.service"
+sleep 5
+chronyc sources
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_ntp.tag
+}
+
+if  [ -f /etc/openstack-newton_tag/install_ntp.tag ]
+then
+	log_info "ntp had installed."
+else
+	fn_install_ntp
+fi
+
+cat >/etc/sysctl.conf<<EOF
+#system
+net.ipv4.tcp_syn_retries = 1
+net.ipv4.tcp_synack_retries = 1
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_keepalive_intvl =15
+net.ipv4.tcp_retries2 = 5
+net.ipv4.tcp_fin_timeout = 2
+net.ipv4.tcp_max_tw_buckets = 36000
+net.ipv4.tcp_tw_recycle = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_max_orphans = 32768
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_wmem = 8192 131072 16777216
+net.ipv4.tcp_rmem = 32768 131072 16777216
+net.ipv4.tcp_mem = 786432 1048576 1572864
+net.ipv4.ip_local_port_range = 1024 65000
+net.core.somaxconn = 16384
+net.core.netdev_max_backlog = 16384
+vm.swappiness=10
+EOF
+
+:<< !
+yum upgrade -y 
+fn_log "yum upgrade -y"
+if  [ -f /etc/yum.repos.d/repo.repo ]
+then
+	log_info " use local yum."
+else 
+	rm -rf /etc/yum.repos.d/CentOS-*
+	fn_log "rm -rf /etc/yum.repos.d/CentOS-*"
+fi
+!
+
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/presystem-computer.tag
+echo -e "\033[32m ####################################\033[0m"
+echo -e "\033[32m ##   Configure  System Sucessed.  ##\033[0m"
+echo -e "\033[32m ####################################\033[0m"
+
+
+
+
+

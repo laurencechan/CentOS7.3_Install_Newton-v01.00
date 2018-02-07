@@ -1,0 +1,7 @@
+[newton]
+name=newton
+baseurl=http://172.16.6.4:8000/newCloud-v1.2/openstack-newton/
+gpgcheck=0
+enabled=1
+priority=1
+proxy=_none_ 

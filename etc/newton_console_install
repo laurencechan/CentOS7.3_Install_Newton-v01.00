@@ -1,0 +1,51 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+function fn_spice_service () {
+yum install spice-server spice-protocol spice-html5 -y
+openstack-config --set  /etc/nova/nova.conf DEFAULT vnc_enabled false
+openstack-config --set  /etc/nova/nova.conf spice html5proxy_base_url=http://${MANAGER_IP}:6082/spice_auto.html
+openstack-config --set  /etc/nova/nova.conf spice server_listen 10.172.10.3
+openstack-config --set  /etc/nova/nova.conf spice server_proxyclient_address=10.172.10.3
+openstack-config --set  /etc/nova/nova.conf spice enabled true
+openstack-config --set  /etc/nova/nova.conf spice keymap en-us
+systemctl restart openstack-nova-compute.service
+}
+
+function fn_vnc_service () {
+openstack-config --set  /etc/nova/nova.conf vnc enabled True
+openstack-config --set  /etc/nova/nova.conf vnc vncserver_listen 0.0.0.0
+openstack-config --set  /etc/nova/nova.conf vnc vncserver_proxyclient_address $my_ip
+novncproxy_base_url = http://${MANAGER_IP}:6080/vnc_auto.html
+systemctl restart openstack-nova-compute.service
+}
+
+if [  ${CONTROLLER_SPICE}  = True   ]
+then
+	fn_spice_service 
+	fn_log "fn_spice_service"
+elif [ ${CONTROLLER_SPICE}  = False ]
+then
+	fn_vnc_service
+	fn_log "fn_vnc_service"
+	log_info "Do not install SPICE on controller. "
+else
+	echo -e "\033[41;37m please check  CONTROLLER_SPICE option in installrc . \033[0m"
+	exit 1
+fi

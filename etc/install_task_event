@@ -1,0 +1,73 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/config_task_event.tag ]
+then 
+	echo -e "\033[41;37m you haved config task and event \033[0m"
+	log_info "you haved config task and event."	
+	exit
+fi
+
+#task_event
+TASK_EVENT_PASSWORD=$(openssl rand -hex 10)
+function fn_create_task_event_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE task_event;"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON task_event.* TO 'task_event'@'localhost' IDENTIFIED BY '${TASK_EVENT_PASSWORD}';"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON task_event.* TO 'task_event'@'%' IDENTIFIED BY '${TASK_EVENT_PASSWORD}';"
+fn_log "create task_event database"
+}
+
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASECINDER=`cat test | grep task_event`
+rm -rf test 
+if [ ${DATABASECINDER}x = task_eventx ]
+then
+	log_info "task_event database had installed."
+else
+	fn_create_task_event_database
+fi
+
+openstack-config --set /etc/oslo_task.conf database connection mysql+pymysql://task_event:${TASK_EVENT_PASSWORD}@${HOST_NAME}/task_event
+fn_log "openstack-config --set /etc/oslo_task.conf database connection mysql+pymysql://task_event:${TASK_EVENT_PASSWORD}@${HOST_NAME}/task_event"
+python /bin/task_db_sync.py /etc/oslo_task.conf
+fn_log "python /bin/task_db_sync.py /etc/oslo_task.conf"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+
+mkdir /download && chown apache.apache -R /download 
+#systemctl restart openstack-glance-api.service openstack-glance-registry.service openstack-nova-* openstack-cinder-volume.service openstack-cinder-api.service neutron-server.service rabbitmq-server.service
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/config_task_event.tag

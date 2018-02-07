@@ -1,0 +1,5 @@
+[cr]
+name=cr
+baseurl=http://172.16.6.4:8000/bluedon/7/cr/x86_64/Packages/
+gpgcheck=0
+enabled=1

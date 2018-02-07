@@ -1,0 +1,393 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/config_keystone.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script oncontroller.  \033[0m"
+	log_error "Oh no ! you can't execute this script oncontroller. "
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/computer.tag ]
+then 
+	echo -e "\033[41;37m you had installed computer \033[0m"
+	log_info "you had installed computer."	
+	exit
+fi
+
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null"
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_selinux () {
+yum clean all && yum install openstack-selinux python-openstackclient yum-plugin-priorities -y 
+fn_log "yum clean all && yum install openstack-selinux -y "
+}
+OPENSTACKSELINUX_COUNT=`rpm -aq |grep openstack-selinux|wc -l`
+if [$OPENSTACKSELINUX_COUNT -ne 0]
+then
+     log_info "openstack-selinux had installed."
+else
+     fn_install_selinux
+fi
+function fn_install_openstackcompute () {
+yum clean all &&  yum install openstack-nova-compute -y
+fn_log "yum clean all &&  yum install openstack-nova-compute sysfsutils -y"
+}
+OPENSTACKCOMPUTE_COUNT=`rpm -aq |grep openstack-nova-compute|wc -l`
+if [$OPENSTACKCOMPUTE_COUNT -ne 0]
+then
+     log_info " openstack-nova-compute had installed."
+else
+     fn_install_openstackcompute
+fi
+
+function fn_install_openstackutils () {
+yum clean all && yum install -y openstack-utils
+fn_log "yum clean all && yum install -y openstack-utils"
+}
+OPENSTACKUTILS_COUNT=`rpm -aq |grep openstack-utils|wc -l`
+if [$OPENSTACKUTILS_COUNT -ne 0]
+then
+     log_info "openstack-utils had installed."
+else
+     fn_install_openstackutils
+fi
+
+#COMPUTE_MANAGER_IP=`cat /etc/hosts | grep -v localhost | grep ${COMPUTE_HOST_NAME} | awk -F " " '{print$1}'`
+
+[ -f   /etc/nova/nova.conf_bak  ] || cp -a  /etc/nova/nova.conf{,_bak} && \
+openstack-config --set /etc/nova/nova.conf   DEFAULT  enabled_apis osapi_compute,metadata && \
+openstack-config --set /etc/nova/nova.conf DEFAULT transport_url rabbit://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${HOST_NAME} && \
+openstack-config --set /etc/nova/nova.conf DEFAULT  auth_strategy  keystone  && \
+#调整云主机大小
+openstack-config --set /etc/nova/nova.conf DEFAULT allow_resize_to_same_host True  && \
+openstack-config --set /etc/nova/nova.conf DEFAULT scheduler_default_filters RetryFilter,AvailabilityZoneFilter,RamFilter,DiskFilter,ComputeFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  auth_uri  http://${HOST_NAME}:5000  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  auth_url  http://${HOST_NAME}:35357  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  memcached_servers  ${HOST_NAME}:11211  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  auth_type  password && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  project_domain_name  Default  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  user_domain_name  Default  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  project_name  service  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  username  nova  && \
+openstack-config --set /etc/nova/nova.conf keystone_authtoken  password ${NOVA_PASSWORD} && \
+openstack-config --set /etc/nova/nova.conf DEFAULT  my_ip  ${COMPUTE_MANAGER_IP} && \
+openstack-config --set /etc/nova/nova.conf DEFAULT  use_neutron  True && \
+openstack-config --set /etc/nova/nova.conf DEFAULT  firewall_driver  nova.virt.firewall.NoopFirewallDriver && \
+openstack-config --set /etc/nova/nova.conf vnc   enabled  True   && \
+openstack-config --set /etc/nova/nova.conf vnc   vncserver_listen  0.0.0.0   && \
+openstack-config --set /etc/nova/nova.conf vnc   vncserver_proxyclient_address  ${COMPUTE_MANAGER_IP}  &&  \
+openstack-config --set /etc/nova/nova.conf vnc   novncproxy_base_url  http://${MANAGER_IP}:6080/vnc_auto.html  &&  \
+openstack-config --set /etc/nova/nova.conf glance  api_servers  http://${HOST_NAME}:9292 && \
+openstack-config --set /etc/nova/nova.conf oslo_concurrency  lock_path  /var/lib/nova/tmp 
+fn_log "openstack-config --set /etc/nova/nova.conf "
+usermod -s /bin/bash nova 
+	passwd nova<<EOF
+	${NOVA_PASSWORD}
+	${NOVA_PASSWORD}
+EOF
+
+HARDWARE=`egrep -c '(vmx|svm)' /proc/cpuinfo`
+if [ ${HARDWARE}  -eq 0 ]
+then 
+	openstack-config --set  /etc/nova/nova.conf libvirt virt_type  qemu 
+	log_info  "openstack-config --set  /etc/nova/nova.conf libvirt virt_type  qemu sucessed."
+	#inject password
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_password True
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_password True"
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_key True
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_key True"
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_partition -1
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_partition -1"
+	openstack-config --set  /etc/nova/nova.conf DEFAULT  vif_plugging_is_fatal  False 
+	fn_log "openstack-config --set  /etc/nova/nova.conf DEFAULT  vif_plugging_is_fatal  False "
+	openstack-config --set  /etc/nova/nova.conf  DEFAULT vif_plugging_timeout  0
+	fn_log "openstack-config --set  /etc/nova/nova.conf  DEFAULT vif_plugging_timeout  0"
+	#vm 迁移
+	sed -i "s@#listen_tls = 0@listen_tls = 0@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_tls = 0@listen_tls = 0@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#listen_tcp = 1@listen_tcp = 1@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_tcp = 1@listen_tcp = 1@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#listen_addr\ =\ \"192.168.0.1\"@listen_addr\ =\ \"0.0.0.0\"@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_addr\ =\ \"192.168.0.1\"@listen_addr\ =\ \"0.0.0.0\"@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#auth_tcp\ =\ \"none\"@auth_tcp\ =\ \"none\"@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#auth_tcp\ =\ \"none\"@auth_tcp\ =\ \"none\"@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#LIBVIRTD_ARGS=\"--listen\"@LIBVIRTD_ARGS=\"--listen\"@g" /etc/sysconfig/libvirtd
+	fn_log "sed -i "s@#LIBVIRTD_ARGS=\"--listen\"@LIBVIRTD_ARGS=\"--listen\"@g" /etc/sysconfig/libvirtd"
+	openstack-config --set  /etc/nova/nova.conf libvirt block_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED,VIR_MIGRATE_NON_SHARED_INC
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt block_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED,VIR_MIGRATE_NON_SHARED_INC"
+	openstack-config --set  /etc/nova/nova.conf libvirt live_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt live_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED"
+	openstack-config --set  /etc/nova/nova.conf libvirt live_migration_uri qemu+tcp://%s/system
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt live_migration_uri qemu+tcp://%s/system"
+else
+	openstack-config --set  /etc/nova/nova.conf libvirt virt_type  kvm
+	log_info  "openstack-config --set  /etc/nova/nova.conf libvirt virt_type  qemu sucessed."
+	#inject password
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_password True
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_password True"
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_key True
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_key True"
+	openstack-config --set  /etc/nova/nova.conf libvirt inject_partition -1
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt inject_partition -1"
+	openstack-config --set  /etc/nova/nova.conf DEFAULT  vif_plugging_is_fatal  False 
+	fn_log "openstack-config --set  /etc/nova/nova.conf DEFAULT  vif_plugging_is_fatal  False "
+	openstack-config --set  /etc/nova/nova.conf  DEFAULT vif_plugging_timeout  0
+	fn_log "openstack-config --set  /etc/nova/nova.conf  DEFAULT vif_plugging_timeout  0"
+	#vm 迁移
+	sed -i "s@#listen_tls = 0@listen_tls = 0@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_tls = 0@listen_tls = 0@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#listen_tcp = 1@listen_tcp = 1@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_tcp = 1@listen_tcp = 1@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#listen_addr\ =\ \"192.168.0.1\"@listen_addr\ =\ \"0.0.0.0\"@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#listen_addr\ =\ \"192.168.0.1\"@listen_addr\ =\ \"0.0.0.0\"@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#auth_tcp\ =\ \"none\"@auth_tcp\ =\ \"none\"@g" /etc/libvirt/libvirtd.conf
+	fn_log "sed -i "s@#auth_tcp\ =\ \"none\"@auth_tcp\ =\ \"none\"@g" /etc/libvirt/libvirtd.conf"
+    sed -i "s@#LIBVIRTD_ARGS=\"--listen\"@LIBVIRTD_ARGS=\"--listen\"@g" /etc/sysconfig/libvirtd
+	fn_log "sed -i "s@#LIBVIRTD_ARGS=\"--listen\"@LIBVIRTD_ARGS=\"--listen\"@g" /etc/sysconfig/libvirtd"
+	openstack-config --set  /etc/nova/nova.conf libvirt block_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED,VIR_MIGRATE_NON_SHARED_INC
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt block_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED,VIR_MIGRATE_NON_SHARED_INC"
+	openstack-config --set  /etc/nova/nova.conf libvirt live_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt live_migration_flag VIR_MIGRATE_UNDEFINE_SOURCE,VIR_MIGRATE_PEER2PEER,VIR_MIGRATE_LIVE,VIR_MIGRATE_TUNNELLED"
+	openstack-config --set  /etc/nova/nova.conf libvirt live_migration_uri qemu+tcp://%s/system
+	fn_log "openstack-config --set  /etc/nova/nova.conf libvirt live_migration_uri qemu+tcp://%s/system"
+fi
+
+systemctl enable libvirtd.service openstack-nova-compute.service  && systemctl start libvirtd.service openstack-nova-compute.service
+fn_log "systemctl enable libvirtd.service openstack-nova-compute.service  && systemctl start libvirtd.service openstack-nova-compute.service"
+
+cat <<END >/root/admin-openrc.sh 
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_USER_DOMAIN_NAME=Default
+export OS_REGION_NAME=${REGION_NAME}
+export OS_PROJECT_NAME=admin
+export OS_USERNAME=admin
+export OS_PASSWORD=${ADMIN_PASSWD}
+export OS_AUTH_URL=http://${HOST_NAME}:35357/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+END
+
+cat <<END >/root/demo-openrc.sh  
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_USER_DOMAIN_NAME=Default
+export OS_REGION_NAME=${REGION_NAME}
+export OS_PROJECT_NAME=demo
+export OS_USERNAME=demo
+export OS_PASSWORD=${DEMO_PASSWD}
+export OS_AUTH_URL=http://${HOST_NAME}:5000/v3
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+END
+
+source /root/admin-openrc.sh
+fn_log "source /root/admin-openrc.sh"
+sleep 5
+openstack compute service list
+fn_log "openstack compute service list"
+
+function fn_install_openvswitch () {
+yum clean all && yum install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch python-neutronclient -y
+fn_log "yum clean all && yum install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch python-neutronclient -y"
+}
+OPENVSWITCH_COUNT=`rpm -aq | grep openstack-neutron-openvswitch | wc -l`
+if [ $OPENVSWITCH_COUNT -ne 0 ]
+then
+     log_info "openstack-neutron-openvswitch had installed."
+else
+     fn_install_openvswitch
+fi
+
+[ -f /etc/neutron/neutron.conf_bak ] || cp -a  /etc/neutron/neutron.conf{,_bak} 
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT transport_url rabbit://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${HOST_NAME}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT auth_strategy  keystone  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_uri  http://${HOST_NAME}:5000  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_url  http://${HOST_NAME}:35357  
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211 &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_type  password  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken project_domain_name  default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken user_domain_name  default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken project_name  service  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken username  neutron  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken password  ${NEUTRON_PASSWORD}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf oslo_concurrency lock_path  /var/lib/neutron/tmp
+fn_log "config /etc/neutron/neutron.conf "
+
+openstack-config --set  /etc/nova/nova.conf neutron url  http://${HOST_NAME}:9696 && \
+openstack-config --set  /etc/nova/nova.conf neutron auth_url  http://${HOST_NAME}:35357 && \
+openstack-config --set  /etc/nova/nova.conf neutron auth_type  password && \
+openstack-config --set  /etc/nova/nova.conf neutron project_domain_name  Default && \
+openstack-config --set  /etc/nova/nova.conf neutron user_domain_name  Default && \
+openstack-config --set  /etc/nova/nova.conf neutron region_name  ${REGION_NAME} && \
+openstack-config --set  /etc/nova/nova.conf neutron project_name  service && \
+openstack-config --set  /etc/nova/nova.conf neutron username  neutron && \
+openstack-config --set  /etc/nova/nova.conf neutron password  ${NEUTRON_PASSWORD}
+fn_log "config /etc/nova/nova.conf"
+
+[ -f /etc/neutron/plugins/ml2/ml2_conf.ini_bak ] || cp -a  /etc/neutron/plugins/ml2/ml2_conf.ini{,_bak}
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch,l2population &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks provider &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000 &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup firewall_driver iptables_hybrid
+fn_log "config /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+[ -f  /etc/neutron/plugins/ml2/openvswitch_agent.ini_bak ] || cp -a   /etc/neutron/plugins/ml2/openvswitch_agent.ini{,_bak} 
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini tenant_network_type vxlan && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings provider:br-ex && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs tunnel_bridge br-tun && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip  ${COMPUTE_MANAGER_IP} && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup firewall_driver iptables_hybrid
+fn_log "config /etc/neutron/plugins/ml2/openvswitch_agent.ini"
+
+rm -rf /etc/neutron/plugin.ini && ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+fn_log "rm -rf /etc/neutron/plugin.ini && ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini"
+
+ovs-vsctl add-br br-ex #创建一个br-ex网桥 
+ovs-vsctl add-port br-ex ${COMPUTE_NET_DEVICE_NAME} #将br-ex桥接到外网卡我这里是${COMPUTE_NET_DEVICE_NAME}
+
+systemctl restart openstack-nova-compute.service
+fn_log "systemctl restart openstack-nova-compute.service"
+systemctl start openvswitch neutron-openvswitch-agent
+fn_log "systemctl start openvswitch neutron-openvswitch-agent"
+systemctl enable openvswitch neutron-openvswitch-agent
+fn_log "systemctl enable openvswitch neutron-openvswitch-agent"
+
+#for ceilometer
+function fn_install_ceilometer () {
+yum clean all && yum install openstack-ceilometer-compute python-ceilometerclient python-pecan -y
+fn_log "yum clean all && yum install openstack-ceilometer-compute python-ceilometerclient python-pecan -y"
+[ -f /etc/ceilometer/ceilometer.conf_bak ] || cp -a /etc/ceilometer/ceilometer.conf {,_bak}
+openstack-config --set  /etc/ceilometer/ceilometer.conf database connection mongodb://ceilometer:${CEILOMETER_PASSWORD}@${HOST_NAME}:27017/ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT rpc_backend rabbit 
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT rabbit_host ${HOST_NAME}
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT rabbit_userid ${RABBITMQ_USER}
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT rabbit_password ${RABBITMQ_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT auth_strategy keystone
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_uri http://${HOST_NAME}:5000
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_url http://${HOST_NAME}:35357
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_type  password
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken user_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_name  service
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken username  ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken  password  ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials auth_type password
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials os_auth_url  http://${HOST_NAME}:5000/v3
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials project_domain_id Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials user_domain_id Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials os_tenant_name service
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials os_username ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials os_password ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials interface internalURL
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials region_name ${REGION_NAME}
+fn_log  "configure  /etc/ceilometer/ceilometer.conf"
+openstack-config --set  /etc/nova/nova.conf DEFAULT instance_usage_audit  True && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT instance_usage_audit_period  hour && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT notify_on_state_change  vm_and_task_state && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT notification_driver  messagingv2
+fn_log  "configure  /etc/nova/nova.conf"
+systemctl enable openstack-ceilometer-compute.service && systemctl start openstack-ceilometer-compute.service
+fn_log "systemctl enable openstack-ceilometer-compute.service && systemctl start openstack-ceilometer-compute.service"
+}
+
+source /root/admin-openrc.sh 
+fn_log "source /root/admin-openrc.sh "
+
+USER_ceilometer=`openstack user list | grep ceilometer | grep -v ceilometer_domain_admin | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_ceilometer}x = ceilometerx ]
+then
+	fn_install_ceilometer
+	fn_log "fn_install_ceilometer"
+else
+	log_info "ceilometer had not installed."
+fi
+
+source /root/admin-openrc.sh
+fn_log "source /root/admin-openrc.sh"
+sleep 5
+neutron ext-list
+fn_log "neutron ext-list"
+neutron agent-list
+fn_log "neutron agent-list"
+
+echo -e "\033[32m ################################################ \033[0m"
+echo -e "\033[32m ###       Install Computer Sucessed          ### \033[0m"
+echo -e "\033[32m ################################################ \033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/computer.tag
+    
+	
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

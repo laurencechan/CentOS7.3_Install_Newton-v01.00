@@ -1,0 +1,6 @@
+[extrart]
+name=extrart
+baseurl=http://10.172.10.191/extrart
+enabled=1
+gpgcheck=0
+

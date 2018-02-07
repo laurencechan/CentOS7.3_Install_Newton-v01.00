@@ -1,0 +1,144 @@
+#!/bin/bash
+#log function
+
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_neutron.tag ]
+then 
+	log_info "neutron have installed ."
+else
+	echo -e "\033[41;37m you should install neutron first. \033[0m"
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_dashboard.tag ]
+then 
+	echo -e "\033[41;37m you haved install dashboard \033[0m"
+	log_info "you haved install dashboard."	
+	exit
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null"
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_dashboard () {
+yum clean all &&  yum install openstack-dashboard -y
+fn_log "yum clean all &&  yum install openstack-dashboard -y"
+}
+OPENSTACKDASHBOARD_COUNT=`rpm -aq | grep openstack-dashboard | wc -l`
+if [ $OPENSTACKDASHBOARD_COUNT -ne 0 ]
+then
+     log_info "openstack-dashboard had installed."
+else
+     fn_install_dashboard
+fi
+
+cp /etc/openstack-dashboard/local_settings{,.bak}
+Setfiles=/etc/openstack-dashboard/local_settings
+sed -i 's#_member_#user#g' $Setfiles
+sed -i "s@OPENSTACK_HOST = \"127.0.0.1\"@OPENSTACK_HOST = \"${HOST_NAME}\"@g" $Setfiles
+#允许所有主机访问
+sed -i "/ALLOWED_HOSTS/cALLOWED_HOSTS = ['*', ]" $Setfiles
+#memcached配置
+sed -i "s@'LOCATION': '127.0.0.1:11211',@'LOCATION': '${HOST_NAME}:11211',@g" $Setfiles
+n=`cat -n $Setfiles | grep "#CACHES" | head -1 | awk -F " " '{printf$1}'`
+t=$[$n+4]
+m=`cat -n $Setfiles | grep "CACHES =" | tail -1 | awk -F " " '{printf$1}'`
+for((i=$n;i<$n+6;i++));do sed -i "$i s@#@@" $Setfiles; done
+sed -i "$t s@,@@" $Setfiles
+for((j=$m;j<$m+5;j++));do sed -i "$j s@^@#@" $Setfiles; done
+
+sed -i 's#%s:5000/v2.0#%s:5000/v3#' $Setfiles
+sed -i '/ULTIDOMAIN_SUPPORT/cOPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True' $Setfiles
+sed -i '/OPENSTACK_KEYSTONE_DEFAULT_DOMAIN /cOPENSTACK_KEYSTONE_DEFAULT_DOMAIN = "default"' $Setfiles
+n=`cat -n $Setfiles | grep "#OPENSTACK_API_VERSIONS" | head -n 1 | awk -F " " '{printf$1}'`
+m=$[$n+1]
+t=$[$n+5]
+for((i=$n;i<$n+7;i++));do sed -i "$i s@#@@" $Setfiles; done
+sed -i "$m s@^@#@" $Setfiles && sed -i "$t s@^@#@" $Setfiles
+
+cp -a $PWD/lib/openstack-dashboard.conf /etc/httpd/conf.d && cp -a $PWD/lib/wsgi-keystone.conf /usr/share/keystone
+
+#config dashboard https
+openssl genrsa -out server.key 1024
+openssl req -new -key server.key -out server.csr<<EOF
+CH
+GD
+GZ
+BD
+IT
+${HOST_NAME}
+
+
+
+
+EOF
+cp -rf server.key server.key.org  
+openssl rsa -in server.key.org -out server.key   
+openssl x509 -req -days 36500 -in server.csr -signkey server.key -out server.crt
+
+function fn_install_mod_ssl () {
+yum clean all &&  yum install -y mod_ssl
+fn_log "yum clean all &&  yum install -y mod_ssl"
+}
+MOD_SSL_COUNT=`rpm -aq | grep mod_ssl | wc -l`
+if [ $MOD_SSL_COUNT -ne 0 ]
+then
+     log_info " mod_ssl had installed."
+else
+     fn_install_mod_ssl
+fi
+
+systemctl enable httpd.service memcached.service &&  systemctl restart httpd.service memcached.service 
+fn_log "systemctl enable httpd.service memcached.service &&  systemctl restart httpd.service memcached.service"
+
+echo -e "\033[32m ############################################################################# \033[0m"
+echo -e "\033[32m ###                     Install Openstack Dashboard                     ##### \033[0m"
+echo -e "\033[32m ###       You can login openstack by https://${MANAGER_IP}              ##### \033[0m"
+echo -e "\033[32m ############################################################################# \033[0m"
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_dashboard.tag
+
+
+
+
+	

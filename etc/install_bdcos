@@ -1,0 +1,117 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/config_bdcos.tag ]
+then 
+	echo -e "\033[41;37m you haved config task and event \033[0m"
+	log_info "you haved config task and event."	
+	exit
+fi
+
+#bdcos
+BDCOS_PASSWORD=$(openssl rand -hex 10)
+function fn_create_bdcos_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE bluedon;"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON *.* TO 'bdcos'@'localhost' IDENTIFIED BY '${BDCOS_PASSWORD}';"
+mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON *.* TO 'bdcos'@'%' IDENTIFIED BY '${BDCOS_PASSWORD}';"
+fn_log "create bdcos database"
+}
+
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEBDCOS=`cat test | grep bdcos`
+rm -rf test 
+if [ ${DATABASEBDCOS}x = bdcosx ]
+then
+	log_info "bdcos database had installed."
+else
+	fn_create_bdcos_database
+fi
+
+mkdir -p /etc/bdcos/ && cp -rp $PWD/lib/bdcos/bdcos.conf /etc/bdcos/
+openstack-config --set /etc/bdcos/bdcos.conf database connection mysql+pymysql://bdcos:${BDCOS_PASSWORD}@${HOST_NAME}
+openstack-config --set /etc/bdcos/bdcos.conf DEFAULT host ${HOST_NAME}:9898
+openstack-config --set /etc/bdcos/bdcos.conf openstack_credentials auth_url http:/${HOST_NAME}:5000/v3
+openstack-config --set /etc/bdcos/bdcos.conf openstack_credentials password ${ADMIN_PASSWD}
+openstack-config --set /etc/bdcos/bdcos.conf openstack_credentials region_name ${REGION_NAME}
+openstack-config --set /etc/bdcos/bdcos.conf keystone_authtoken auth_uri http://${HOST_NAME}:5000
+openstack-config --set /etc/bdcos/bdcos.conf keystone_authtoken auth_url http://${HOST_NAME}:35357
+openstack-config --set /etc/bdcos/bdcos.conf keystone_authtoken memcached_servers ${HOST_NAME}:11211
+openstack-config --set /etc/bdcos/bdcos.conf keystone_authtoken password ${BDCOS_PASSWORD}
+openstack-config --set /etc/bdcos/bdcos.conf keystone_authtoken region_name ${REGION_NAME}
+
+source /root/admin-openrc.sh
+USER_BDCOS=`openstack user list | grep bdcos | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_BDCOS}x = bdcosx ]
+then
+	log_info "openstack user had created  bdcos"
+else
+	openstack user create --domain default bdcos --password ${BDCOS_PASSWORD}
+	fn_log "openstack user create bdcos --password ${BDCOS_PASSWORD}"
+	openstack role add --project service --user bdcos admin
+	fn_log "openstack role add --project service --user bdcos admin"
+fi
+
+SERVICE_BDCOS=`openstack service list | grep bdcos | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [  ${SERVICE_BDCOS}x = bdcosx ]
+then 
+	log_info "openstack service create bdcos and bdcos."
+else
+	openstack service create --name bdcos --description " Bluedon community os " community
+	fn_log "openstack service create --name bdcos --description " Bluedon community os " community"
+fi
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list  | grep bdcos  |grep internal | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep bdcos   |grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep bdcos   |grep admin | wc -l`
+if [ ${ENDPOINT_LIST_INTERNAL} -eq 0 ] && [ ${ENDPOINT_LIST_PUBLIC} -eq  0 ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 0 ]
+then
+	openstack endpoint create --region ${REGION_NAME} bdcos public http://${HOST_NAME}:9898 && openstack endpoint create --region ${REGION_NAME} bdcos internal http://${HOST_NAME}:9898 && openstack endpoint create --region ${REGION_NAME} bdcos admin http://${HOST_NAME}:9898
+	fn_log "openstack endpoint create --region ${REGION_NAME} bdcos public http://${HOST_NAME}:9898 && openstack endpoint create --region ${REGION_NAME} bdcos internal http://${HOST_NAME}:9898 && openstack endpoint create --region ${REGION_NAME} bdcos admin http://${HOST_NAME}:9898"
+else
+	log_info "openstack endpoint create bdcos."
+fi
+
+cp -rp $PWD/lib/bdcos/bdcos_server.conf /etc/httpd/conf.d/
+mkdir /var/log/bdcos
+chown apache.apache -R /var/log/bdcos
+python /usr/lib/python2.7/site-packages/bdcos/migrations/manage.py db sync --database=bluedon
+systemctl reload httpd
+fn_log "systemctl reload httpd"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/config_bdcos.tag

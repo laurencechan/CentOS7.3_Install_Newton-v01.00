@@ -1,0 +1,172 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/config_keystone.tag ]
+then 
+	echo -e "\033[41;37m Oh no ! you can't execute this script on controller node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on controller node. "
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_neutron.tag ]
+then 
+	echo -e "\033[41;37m you haved install neutron \033[0m"
+	log_info "you haved install neutron."	
+	exit
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null "
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+function fn_install_openstackutils () {
+yum clean all && yum install -y openstack-utils
+fn_log "yum clean all && yum install -y openstack-utils"
+}
+OPENSTACKUTILS_COUNT=`rpm -aq |grep openstack-utils|wc -l`
+if [$OPENSTACKUTILS_COUNT -ne 0]
+then
+     log_info "openstack-utils had installed."
+else
+     fn_install_openstackutils
+fi
+
+function fn_install_neutron () {
+yum clean all && yum install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch -y
+fn_log "yum clean all && yum install openstack-neutron openstack-neutron-ml2 openstack-neutron-openvswitch -y"
+}
+
+OPENSTACKNEUTRON_COUNT=`rpm -aq | grep openstack-neutron* | wc -l`
+if [ $OPENSTACKNEUTRON_COUNT -ne 0 ]
+then
+     log_info "openstack-neutron* had installed."
+else
+     fn_install_neutron
+fi
+
+[ -f /etc/neutron/neutron.conf_bak ] || cp -a  /etc/neutron/neutron.conf{,_bak} 
+openstack-config --set  /etc/neutron/neutron.conf database connection mysql+pymysql://neutron:${NEUTRON_PASSWORD}@${HOST_NAME}/neutron &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT core_plugin  ml2  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT service_plugins router  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT allow_overlapping_ips  True  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT transport_url rabbit://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${HOST_NAME}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT auth_strategy  keystone  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_uri  http://${HOST_NAME}:5000  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_url  http://${HOST_NAME}:35357  
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211 &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken auth_type  password  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken project_domain_name  Default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken user_domain_name  Default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken project_name  service  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken username  neutron  &&   \
+openstack-config --set  /etc/neutron/neutron.conf keystone_authtoken password  ${NEUTRON_PASSWORD}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_status_changes  True  &&   \
+openstack-config --set  /etc/neutron/neutron.conf DEFAULT notify_nova_on_port_data_changes  True  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova auth_url  http://${HOST_NAME}:35357  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova auth_type  password  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova project_domain_name  Default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova user_domain_name  Default  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova region_name  ${REGION_NAME}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova project_name  service  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova username  nova  &&   \
+openstack-config --set  /etc/neutron/neutron.conf nova password  ${NOVA_PASSWORD}  &&   \
+openstack-config --set  /etc/neutron/neutron.conf oslo_concurrency lock_path  /var/lib/neutron/tmp
+fn_log "config /etc/neutron/neutron.conf "
+
+[ -f /etc/neutron/plugins/ml2/ml2_conf.ini_bak ] || cp -a  /etc/neutron/plugins/ml2/ml2_conf.ini{,_bak}
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 type_drivers flat,vlan,vxlan &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 tenant_network_types vxlan &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 mechanism_drivers openvswitch,l2population &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2 extension_drivers port_security &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_flat flat_networks provider &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini ml2_type_vxlan vni_ranges 1:1000 &&   \
+openstack-config --set /etc/neutron/plugins/ml2/ml2_conf.ini securitygroup firewall_driver iptables_hybrid
+fn_log "config /etc/neutron/plugins/ml2/ml2_conf.ini"
+
+#SECONF_ETH=${NEUTRON_DEVICE_NAME}
+#FIRST_ETH_IP=${NEUTRON_MANAGER_IP}
+[ -f  /etc/neutron/plugins/ml2/openvswitch_agent.ini_bak ] || cp -a   /etc/neutron/plugins/ml2/openvswitch_agent.ini{,_bak} 
+#openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini tenant_network_type  vxlan
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs bridge_mappings  provider:br-${NEUTRON_DEVICE_NAME} && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs tunnel_bridge  br-tun && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini ovs local_ip  ${NEUTRON_MANAGER_IP} && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini agent l2_population True && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini agent tunnel_types vxlan && \
+openstack-config --set   /etc/neutron/plugins/ml2/openvswitch_agent.ini securitygroup firewall_driver iptables_hybrid
+fn_log "config /etc/neutron/plugins/ml2/openvswitch_agent.ini"
+
+[ -f   /etc/neutron/l3_agent.ini_bak ] || cp -a    /etc/neutron/l3_agent.ini{,_bak} 
+openstack-config --set  /etc/neutron/l3_agent.ini DEFAULT interface_driver neutron.agent.linux.interface.OVSInterfaceDriver
+openstack-config --set  /etc/neutron/l3_agent.ini DEFAULT external_network_bridge
+fn_log "config /etc/neutron/l3_agent.ini "
+
+[ -f   /etc/neutron/dhcp_agent.ini_bak ] || cp -a    /etc/neutron/dhcp_agent.ini{,_bak} 
+openstack-config --set  /etc/neutron/dhcp_agent.ini DEFAULT interface_driver openvswitch && \
+openstack-config --set  /etc/neutron/dhcp_agent.ini DEFAULT dhcp_driver neutron.agent.linux.dhcp.Dnsmasq && \
+openstack-config --set  /etc/neutron/dhcp_agent.ini DEFAULT enable_isolated_metadata  True && \
+openstack-config --set  /etc/neutron/dhcp_agent.ini DEFAULT dnsmasq_config_file /etc/neutron/dnsmasq-neutron.conf
+fn_log "config /etc/neutron/dhcp_agent.ini "
+
+cat >/etc/neutron/dnsmasq-neutron.conf <<EOF
+dhcp-option-force=26,1450
+EOF
+
+[ -f /etc/neutron/metadata_agent.ini_bak ] || cp -a  /etc/neutron/metadata_agent.ini /etc/neutron/metadata_agent.ini_bak && \
+openstack-config --set  /etc/neutron/metadata_agent.ini  DEFAULT nova_metadata_ip  ${HOST_NAME}   && \
+openstack-config --set  /etc/neutron/metadata_agent.ini  DEFAULT metadata_proxy_shared_secret  ${NEUTRON_METADATA_SHARED_PASSWORD} 
+fn_log "config /etc/neutron/metadata_agent.ini"
+
+rm -rf /etc/neutron/plugin.ini && ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini
+fn_log "rm -rf /etc/neutron/plugin.ini && ln -s /etc/neutron/plugins/ml2/ml2_conf.ini /etc/neutron/plugin.ini"
+
+systemctl enable neutron-openvswitch-agent.service
+systemctl start neutron-openvswitch-agent.service
+ovs-vsctl add-br br-${NEUTRON_DEVICE_NAME} #创建一个br-${NEUTRON_DEVICE_NAME}网桥 
+ovs-vsctl add-port br-${NEUTRON_DEVICE_NAME} ${NEUTRON_DEVICE_NAME} #将br-${NEUTRON_DEVICE_NAME}桥接到外网卡我这里是${NEUTRON_DEVICE_NAME}
+
+systemctl enable neutron-openvswitch-agent.service neutron-l3-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service && systemctl start  neutron-openvswitch-agent.service neutron-l3-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service
+fn_log "systemctl enable neutron-openvswitch-agent.service neutron-l3-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service && systemctl start  neutron-openvswitch-agent.service neutron-l3-agent.service neutron-dhcp-agent.service neutron-metadata-agent.service"

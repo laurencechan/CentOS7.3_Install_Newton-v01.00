@@ -1,0 +1,380 @@
+#!/bin/bash
+#log function
+if [  -e $PWD/lib/newton-log ]
+then	
+	source $PWD/lib/newton-log
+else
+	echo -e "\033[41;37m $PWD/lib/newton-log is not exist. \033[0m"
+	exit 1
+fi
+
+#input variable
+if [  -e $PWD/lib/installrc ]
+then	
+	source $PWD/lib/installrc 
+else
+	echo -e "\033[41;37m $PWD/lib/installrc is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e $PWD/lib/SaveRandPasswd ]
+then	
+	source $PWD/lib/SaveRandPasswd 
+else
+	echo -e "\033[41;37m $PWD/lib/SaveRandPasswd is not exist. \033[0m"
+	exit 1
+fi
+
+if [  -e /etc/openstack-newton_tag/computer.tag  ]
+then
+	echo -e "\033[41;37m Oh no ! you can't execute this script on computer node.  \033[0m"
+	log_error "Oh no ! you can't execute this script on computer node. "
+	exit 1 
+fi
+
+if [ -f  /etc/openstack-newton_tag/config_keystone.tag ]
+then 
+	log_info "mkeystone have installed ."
+else
+	echo -e "\033[41;37m you should install keystone first. \033[0m"
+	exit 1
+fi
+
+if [ -f  /etc/openstack-newton_tag/install_ceilometer.tag ]
+then 
+	echo -e "\033[41;37m you haved install ceilometer \033[0m"
+	log_info "you haved install ceilometer."	
+	exit
+fi
+
+function  fn_create_ceilometer_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE ceilometer;" &&  mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON ceilometer.* TO 'ceilometer'@'localhost' IDENTIFIED BY '${CEILOMETER_PASSWORD}';" && mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON ceilometer.* TO 'ceilometer'@'%' IDENTIFIED BY '${CEILOMETER_PASSWORD}';" 
+fn_log "create ceilometer databases"
+}
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASECEILOMETER=`cat test | grep ceilometer`
+rm -rf test 
+if [ ${DATABASECEILOMETER}x = ceilometerx ]
+then
+	log_info "ceilometer database had installed."
+else
+	fn_create_ceilometer_database
+fi
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+source /root/admin-openrc.sh 
+USER_ceilometer=`openstack user list | grep ceilometer | grep -v ceilometer_domain_admin | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_ceilometer}x = ceilometerx ]
+then
+	log_info "openstack user had created  ceilometer"
+else
+	openstack user create  --domain default ceilometer  --password ${CEILOMETER_PASSWORD}
+	fn_log "openstack user create --domain default ceilometer  --password ${CEILOMETER_PASSWORD}"
+	openstack role add --project service --user ceilometer admin
+	fn_log "openstack role add --project service --user ceilometer admin"
+fi
+
+SERVICE_IMAGE=`openstack service list | grep ceilometer | awk -F "|" '{print$3}' | awk -F " " '{print$1}' | grep -v  ceilometerv2`
+if [  ${SERVICE_IMAGE}x = ceilometerx ]
+then 
+	log_info "openstack service create ceilometer."
+else
+	openstack service create --name ceilometer   --description "Telemetry" metering
+	fn_log "openstack service create --name ceilometer   --description "Telemetry" metering"
+fi
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list  | grep metering  |grep internal  | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep metering   |grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep metering  |grep admin | wc -l`
+if [  ${ENDPOINT_LIST_INTERNAL}  -eq 1  ]  && [ ${ENDPOINT_LIST_PUBLIC}  -eq  1   ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 1  ]
+then
+	log_info "openstack endpoint create ceilometer."
+else
+	openstack endpoint create --region ${REGION_NAME}   metering public http://${HOST_NAME}:8777 && openstack endpoint create --region ${REGION_NAME}   metering internal http://${HOST_NAME}:8777 && openstack endpoint create --region ${REGION_NAME}   metering admin http://${HOST_NAME}:8777
+	fn_log "openstack endpoint create --region ${REGION_NAME}   metering public http://${HOST_NAME}:8777 && openstack endpoint create --region ${REGION_NAME}   metering internal http://${HOST_NAME}:8777 && openstack endpoint create --region ${REGION_NAME}   metering admin http://${HOST_NAME}:8777"
+fi
+
+#test network
+function fn_test_network () {
+if [ -f $PWD/lib/proxy.sh ]
+then 
+	source  $PWD/lib/proxy.sh
+fi
+curl www.baidu.com >/dev/null   
+fn_log "curl www.baidu.com >/dev/null "
+}
+
+if  [ -f /etc/yum.repos.d/newton.repo ]
+then
+	log_info " use local yum."
+else 
+	fn_test_network
+fi
+
+#for controller
+function fn_install_ceilometer () {
+yum clean all &&  yum install openstack-ceilometer-api   openstack-ceilometer-collector openstack-ceilometer-notification   openstack-ceilometer-central python-ceilometerclient -y
+fn_log "yum clean all &&  yum install openstack-ceilometer-api   openstack-ceilometer-collector openstack-ceilometer-notification   openstack-ceilometer-central python-ceilometerclient -y"
+}
+OPENSTACKCEILOMETER_COUNT=`rpm -aq |grep openstack-ceilometer-*|wc -l`
+if [ $OPENSTACKCEILOMETER_COUNT -ne 0 ]
+then
+     log_info "openstack-ceilometer-* had installed."
+else
+     fn_install_ceilometer
+fi
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+
+[ -f /etc/ceilometer/ceilometer.conf_bak ] || cp -a /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf_bak
+openstack-config --set  /etc/ceilometer/ceilometer.conf database connection  mysql+pymysql://ceilometer:${CEILOMETER_PASSWORD}@${HOST_NAME}/ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT  rpc_backend  rabbit
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_host  ${HOST_NAME}
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_userid  ${RABBITMQ_USER}
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT auth_strategy  keystone
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_uri  http://${HOST_NAME}:5000
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_url  http://${HOST_NAME}:35357
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_type  password
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken user_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_name  service
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken username  ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken  password  ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials auth_url  http://${HOST_NAME}:5000
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials project_domain_id Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials user_domain_id Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials auth_type password
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials username  ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials tenant_name  service
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials password  ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials interface  internalURL
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials region_name  ${REGION_NAME}
+fn_log  "configure  /etc/ceilometer/ceilometer.conf"
+
+python /bin/ceilometer-dbsync 
+fn_log "python /bin/ceilometer-dbsync"
+
+systemctl enable openstack-ceilometer-api.service   openstack-ceilometer-notification.service   openstack-ceilometer-central.service   openstack-ceilometer-collector.service
+fn_log "systemctl enable openstack-ceilometer-api.service   openstack-ceilometer-notification.service   openstack-ceilometer-central.service   openstack-ceilometer-collector.service"
+systemctl start openstack-ceilometer-api.service   openstack-ceilometer-notification.service   openstack-ceilometer-central.service   openstack-ceilometer-collector.service
+fn_log "systemctl restart openstack-ceilometer-api.service   openstack-ceilometer-notification.service   openstack-ceilometer-central.service   openstack-ceilometer-collector.service"
+
+#for glance 
+
+openstack-config --set  /etc/glance/glance-api.conf   DEFAULT rpc_backend  rabbit && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_notifications driver  messagingv2 && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_host  ${HOST_NAME} && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_userid ${RABBITMQ_USER} && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}
+fn_log "openstack-config --set  /etc/glance/glance-api.conf   DEFAULT rpc_backend  rabbit && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_notifications driver  messagingv2 && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_host  ${HOST_NAME} && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_userid ${RABBITMQ_USER} && openstack-config --set  /etc/glance/glance-api.conf  oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}"
+openstack-config --set  /etc/glance/glance-registry.conf   DEFAULT rpc_backend  rabbit && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_notifications driver  messagingv2 && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_host  ${HOST_NAME} && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_userid ${RABBITMQ_USER} && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}
+fn_log "openstack-config --set  /etc/glance/glance-registry.conf   DEFAULT rpc_backend  rabbit && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_notifications driver  messagingv2 && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_host  ${HOST_NAME} && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_userid ${RABBITMQ_USER} && openstack-config --set  /etc/glance/glance-registry.conf  oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}"
+
+systemctl restart openstack-glance-api.service openstack-glance-registry.service
+fn_log "systemctl restart openstack-glance-api.service openstack-glance-registry.service"
+
+#for computer node
+function fn_install_ceilometer_compute () {
+yum clean all && yum install openstack-ceilometer-compute python-ceilometerclient python-pecan -y
+fn_log "yum clean all && yum install openstack-ceilometer-compute python-ceilometerclient python-pecan -y"
+}
+OPENSTACKCEILOMETER_COMPUTER_COUNT=`rpm -aq |grep openstack-ceilometer-compute|wc -l`
+if [ $OPENSTACKCEILOMETER_COMPUTER_COUNT -ne 0 ]
+then
+     log_info "openstack-ceilometer-compute had installed."
+else
+     fn_install_ceilometer_compute
+fi
+
+[ -f /etc/ceilometer/ceilometer.conf_bak ] || cp -a /etc/ceilometer/ceilometer.conf /etc/ceilometer/ceilometer.conf_bak
+openstack-config --set  /etc/ceilometer/ceilometer.conf database connection   mysql+pymysql://ceilometer:${CEILOMETER_PASSWORD}@${HOST_NAME}/ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT  rpc_backend  rabbit
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_host  ${HOST_NAME}
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_userid  ${RABBITMQ_USER}
+openstack-config --set  /etc/ceilometer/ceilometer.conf oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf DEFAULT auth_strategy  keystone
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_uri  http://${HOST_NAME}:5000
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_url  http://${HOST_NAME}:35357
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken auth_type  password
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken user_domain_name  Default
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken project_name  service
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken username  ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf keystone_authtoken  password  ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials auth_url  http://${HOST_NAME}:5000/v3
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials username  ceilometer
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials tenant_name  service
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials password  ${CEILOMETER_PASSWORD}
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials interface  internalURL
+openstack-config --set  /etc/ceilometer/ceilometer.conf service_credentials region_name  ${REGION_NAME}
+fn_log  "configure  /etc/ceilometer/ceilometer.conf"
+
+openstack-config --set  /etc/nova/nova.conf DEFAULT  instance_usage_audit  True && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT  instance_usage_audit_period  hour && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT notify_on_state_change  vm_and_task_state && \
+openstack-config --set  /etc/nova/nova.conf DEFAULT notification_driver  messagingv2
+fn_log  "configure  /etc/nova/nova.conf"
+
+systemctl enable openstack-ceilometer-compute.service && systemctl start openstack-ceilometer-compute.service
+fn_log "systemctl enable openstack-ceilometer-compute.service && systemctl start openstack-ceilometer-compute.service"
+
+if [ -e /etc/systemd/system/multi-user.target.wants/openstack-nova-compute.service ]
+then
+	systemctl restart openstack-nova-compute.service
+	fn_log "systemctl restart openstack-nova-compute.service"
+fi
+#for cinder
+openstack-config --set /etc/cinder/cinder.conf  oslo_messaging_notifications driver  messagingv2
+fn_log "openstack-config --set /etc/cinder/cinder.conf  oslo_messaging_notifications driver  messagingv2"
+systemctl restart openstack-cinder-api.service openstack-cinder-scheduler.service 
+
+
+if [ -e /etc/systemd/system/multi-user.target.wants/openstack-cinder-api.service  ]
+then
+	systemctl restart openstack-cinder-volume.service
+	fn_log "systemctl restart openstack-cinder-volume.service"
+fi
+
+
+ResellerAdmin_role=`openstack role  list | grep ResellerAdmin | wc -l`
+if [  ${ResellerAdmin_role} -eq 0 ]
+then
+	openstack role create ResellerAdmin
+	fn_log "openstack role create ResellerAdmin"
+	openstack role add --project service --user ceilometer ResellerAdmin
+	fn_log "openstack role add --project service --user ceilometer ResellerAdmin"
+fi
+
+function fn_install_ceilometermiddleware () {
+yum clean all &&  yum install python-ceilometermiddleware -y
+}
+CEILOMETERMIDDLEWARE_COUNT=`rpm -aq |grep python-ceilometermiddleware|wc -l`
+if [ $CEILOMETERMIDDLEWARE_COUNT -ne 0 ]
+then
+     log_info "python-ceilometermiddleware had installed."
+else
+     fn_install_ceilometermiddleware
+fi
+
+#create aodh databases 
+function  fn_create_aodh_database () {
+mysql -uroot -p${MARIADB_PASSWORD} -e "CREATE DATABASE aodh;" &&  mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON aodh.* TO 'aodh'@'localhost'   IDENTIFIED BY '${AODH_PASSWORD}';" && mysql -uroot -p${MARIADB_PASSWORD} -e "GRANT ALL PRIVILEGES ON aodh.* TO 'aodh'@'%'   IDENTIFIED BY '${AODH_PASSWORD}';" 
+fn_log "create aodh databases"
+}
+mysql -uroot -p${MARIADB_PASSWORD} -e "show databases ;" >test 
+DATABASEaodh=`cat test | grep aodh`
+rm -rf test 
+if [ ${DATABASEaodh}x = aodhx ]
+then
+	log_info "aodh database had installed."
+else
+	fn_create_aodh_database
+fi
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+source /root/admin-openrc.sh 
+USER_aodh=`openstack user list | grep aodh | awk -F "|" '{print$3}' | awk -F " " '{print$1}'`
+if [ ${USER_aodh}x = aodhx ]
+then
+	log_info "openstack user had created  aodh"
+else
+	openstack user create  --domain default aodh  --password ${AODH_PASSWORD}
+	fn_log "openstack user create --domain default aodh  --password ${AODH_PASSWORD}"
+	openstack role add --project service --user aodh admin
+	fn_log "openstack role add --project service --user aodh admin"
+fi
+
+SERVICE_IMAGE=`openstack service list | grep alarming | awk -F "|" '{print$3}' | awk -F " " '{print$1}' `
+if [  ${SERVICE_IMAGE}x = aodhx ]
+then 
+	log_info "openstack service create aodh."
+else
+	openstack service create --name aodh   --description "Telemetry" alarming
+	fn_log "openstack service create --name aodh   --description "Telemetry" alarming"
+fi
+
+
+ENDPOINT_LIST_INTERNAL=`openstack endpoint list  | grep alarming   |grep internal |grep -v aodhv2 | wc -l`
+ENDPOINT_LIST_PUBLIC=`openstack endpoint list | grep alarming   |grep -v aodhv2 |grep public | wc -l`
+ENDPOINT_LIST_ADMIN=`openstack endpoint list | grep alarming   |grep -v aodhv2 |grep admin | wc -l`
+if [  ${ENDPOINT_LIST_INTERNAL}  -eq 1  ]  && [ ${ENDPOINT_LIST_PUBLIC}  -eq  1   ] &&  [ ${ENDPOINT_LIST_ADMIN} -eq 1  ]
+then
+	log_info "openstack endpoint create aodh."
+else
+	openstack endpoint create --region ${REGION_NAME}   alarming public http://${HOST_NAME}:8042 &&   openstack endpoint create --region ${REGION_NAME}   alarming internal http://${HOST_NAME}:8042 &&   openstack endpoint create --region ${REGION_NAME}   alarming admin http://${HOST_NAME}:8042
+	fn_log "openstack endpoint create --region ${REGION_NAME}   alarming public http://${HOST_NAME}:8042 &&   openstack endpoint create --region ${REGION_NAME}   alarming internal http://${HOST_NAME}:8042 &&   openstack endpoint create --region ${REGION_NAME}   alarming admin http://${HOST_NAME}:8042"
+fi
+
+#for controller
+function fn_install_aodh () {
+yum clean all &&  yum install openstack-aodh-api   openstack-aodh-evaluator openstack-aodh-notifier   openstack-aodh-listener openstack-aodh-expirer   python-ceilometerclient -y
+fn_log "yum clean all &&  yum install openstack-aodh-api   openstack-aodh-evaluator openstack-aodh-notifier   openstack-aodh-listener openstack-aodh-expirer   python-ceilometerclient -y"
+}
+OPENSTACKAODB_COUNT=`rpm -aq |grep openstack-aodh-*|wc -l`
+if [ $OPENSTACKAODB_COUNT -ne 0 ]
+then
+     log_info "openstack-aodh-* had installed."
+else
+     fn_install_aodh
+fi
+
+unset http_proxy https_proxy ftp_proxy no_proxy 
+
+[ -f /etc/aodh/aodh.conf_bak ] || cp -a /etc/aodh/aodh.conf /etc/aodh/aodh.conf_bak
+openstack-config --set  /etc/aodh/aodh.conf database connection    mysql+pymysql://aodh:${AODH_PASSWORD}@${HOST_NAME}/aodh  && \
+openstack-config --set  /etc/aodh/aodh.conf DEFAULT rpc_backend  rabbit  && \
+openstack-config --set  /etc/aodh/aodh.conf oslo_messaging_rabbit rabbit_host  ${HOST_NAME} &&  \
+openstack-config --set  /etc/aodh/aodh.conf oslo_messaging_rabbit rabbit_userid  ${RABBITMQ_USER}  &&  \
+openstack-config --set  /etc/aodh/aodh.conf oslo_messaging_rabbit rabbit_password  ${RABBITMQ_PASSWORD} && \
+openstack-config --set  /etc/aodh/aodh.conf DEFAULT auth_strategy  keystone &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken memcached_servers  ${HOST_NAME}:11211 && \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken auth_uri  http://${HOST_NAME}:5000 &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken auth_url  http://${HOST_NAME}:35357 &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken auth_type  password &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken project_domain_name  Default &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken user_domain_name  Default &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken project_name  service &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken username  aodh &&  \
+openstack-config --set  /etc/aodh/aodh.conf keystone_authtoken  password  ${AODH_PASSWORD}   &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials auth_url  http://${HOST_NAME}:5000/v3 &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials username  aodh &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials tenant_name  service &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials password  ${AODH_PASSWORD}  &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials interface  internalURL &&  \
+openstack-config --set  /etc/aodh/aodh.conf service_credentials region_name  ${REGION_NAME}
+fn_log   "configure /etc/aodh/aodh.conf"
+
+sed -i "s@default=8000@default=8042@g" /usr/bin/aodh-api
+fn_log "sed -i "s@default=8000@default=8042@g" /usr/bin/aodh-api"
+sed -i "s@ --logfile /var/log/aodh/api.log@@g" /usr/lib/systemd/system/openstack-aodh-api.service
+fn_log "sed -i "s@ --logfile /var/log/aodh/api.log@@g" /usr/lib/systemd/system/openstack-aodh-api.service"
+python /bin/aodh-dbsync
+fn_log "python /bin/aodh-dbsync"
+
+systemctl enable openstack-aodh-api.service   openstack-aodh-evaluator.service   openstack-aodh-notifier.service   openstack-aodh-listener.service
+fn_log "systemctl enable openstack-aodh-api.service   openstack-aodh-evaluator.service   openstack-aodh-notifier.service   openstack-aodh-listener.service"
+systemctl daemon-reload && systemctl start openstack-aodh-api.service   openstack-aodh-evaluator.service   openstack-aodh-notifier.service   openstack-aodh-listener.service
+fn_log "systemctl daemon-reload && systemctl start openstack-aodh-api.service   openstack-aodh-evaluator.service   openstack-aodh-notifier.service   openstack-aodh-listener.service"
+
+source /root/admin-openrc.sh 
+fn_log "source /root/admin-openrc.sh "
+
+ceilometer meter-list
+fn_log "ceilometer meter-list "
+IMAGE_ID=$(glance image-list | grep 'cirros' | awk '{ print $2 }')
+glance image-download $IMAGE_ID > /tmp/cirros.img
+fn_log "glance image-download $IMAGE_ID > /tmp/cirros.img"
+ceilometer meter-list
+fn_log "ceilometer meter-list"
+ceilometer statistics -m image.download -p 60
+fn_log "ceilometer statistics -m image.download -p 60"
+rm -f /tmp/cirros.img
+
+echo -e "\033[32m ####################################################\033[0m"
+echo -e "\033[32m ###        Install Ceilometer Sucessed           ###\033[0m"
+echo -e "\033[32m ####################################################\033[0m"
+
+if  [ ! -d /etc/openstack-newton_tag ]
+then 
+	mkdir -p /etc/openstack-newton_tag  
+fi
+echo `date "+%Y-%m-%d %H:%M:%S"` >/etc/openstack-newton_tag/install_ceilometer.tag
